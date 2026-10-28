@@ -227,6 +227,26 @@ impl Studio {
     }
 }
 
+/// Hooks for tests of other popups: a window that is not one.
+#[cfg(test)]
+impl AppView {
+    /// `cat` stands in for the studio window: it takes lines and echoes them.
+    pub(crate) fn attach_fake_studio(&mut self) {
+        let cat = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let wake = self.studio_wake();
+        self.studio.canvas = Some(attach(cat, Path::new("/none.deck.json"), wake).unwrap());
+    }
+
+    /// The file studio was last pointed at.
+    pub(crate) fn studio_last_file(&self) -> Option<PathBuf> {
+        self.studio.last_deck.clone()
+    }
+}
+
 impl AppView {
     fn files_dir(&self) -> PathBuf {
         self.space.files_dir(&self.active_space.name)
@@ -238,19 +258,23 @@ impl AppView {
     }
 
     /// Open or focus the studio linked to this terminal, on `deck` or on the
-    /// most recent one.
+    /// one it showed last. With neither, the library opens instead, to choose.
     pub fn open_studio(&mut self, deck: Option<&str>) -> Result<()> {
         if self.incognito {
             bail!("studio isn't available in incognito mode");
         }
         let files = self.files_dir();
+        let path = match (deck, &self.studio.last_deck) {
+            (Some(deck), _) if Path::new(deck).is_absolute() => PathBuf::from(deck),
+            (Some(deck), _) => files.join(deck),
+            (None, Some(last)) => last.clone(),
+            (None, None) => {
+                crate::ui::popups::library::open(self);
+                return Ok(());
+            }
+        };
         std::fs::create_dir_all(files.join("decks"))?;
         std::fs::create_dir_all(files.join("docs"))?;
-        let path = match deck {
-            Some(deck) if Path::new(deck).is_absolute() => PathBuf::from(deck),
-            Some(deck) => files.join(deck),
-            None => self.default_deck(&files),
-        };
         let path = std::path::absolute(path)?;
         self.studio.last_deck = Some(path.clone());
         if let Some(canvas) = &mut self.studio.canvas {
@@ -274,30 +298,6 @@ impl AppView {
                 colors: self.theme.colors(),
             });
         }
-    }
-
-    /// The file for `/studio` without an argument: the last one the model
-    /// touched or studio showed, else the newest deck or doc, else a new
-    /// untitled deck.
-    fn default_deck(&self, files: &Path) -> PathBuf {
-        if let Some(last) = &self.studio.last_deck {
-            return last.clone();
-        }
-        ["decks", "docs"]
-            .iter()
-            .flat_map(|folder| {
-                std::fs::read_dir(files.join(folder))
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-            })
-            .filter(|entry| {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                name.ends_with(".deck.json") || name.ends_with(".doc.json")
-            })
-            .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
-            .max()
-            .map_or_else(|| files.join("decks/untitled.deck.json"), |(_, path)| path)
     }
 
     /// Tool cards hint at `/studio` only while no window is attached, so a

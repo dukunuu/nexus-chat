@@ -10,13 +10,7 @@ impl Backend {
         path: Option<&Path>,
         template: Option<&str>,
     ) -> Result<Event> {
-        let output = nexus_core::design::template::export_deck(
-            &self.deck,
-            Some(&asset_root(&self.path)?),
-            &self.files_dir,
-            format,
-            template,
-        )?;
+        let output = self.deck_output(&self.deck, &self.path, format, template)?;
         let path = deck::export::write_export(&output, &self.files_dir, path)?;
         self.exports.push(path.clone());
         Ok(Event::Exported {
@@ -25,11 +19,33 @@ impl Backend {
         })
     }
 
+    /// A deck as a file in `format`, not yet written anywhere.
+    pub(super) fn deck_output(
+        &self,
+        deck: &deck::Deck,
+        path: &Path,
+        format: deck::export::Format,
+        template: Option<&str>,
+    ) -> Result<deck::export::Export> {
+        nexus_core::design::template::export_deck(
+            deck,
+            Some(&asset_root(path)?),
+            &self.files_dir,
+            format,
+            template,
+        )
+    }
+
     pub(super) fn reveal(&self, path: &Path) -> Result<Event> {
         ensure!(
             self.exports.iter().any(|p| p == path),
             "only this window's exported files can be revealed"
         );
+        Self::show_in_folder(path)
+    }
+
+    /// Open the file manager on `path`, through an argv and never a shell.
+    pub(super) fn show_in_folder(path: &Path) -> Result<Event> {
         let (program, args) = reveal_argv(path, std::env::consts::OS);
         let mut child = std::process::Command::new(program).args(args).spawn()?;
         std::thread::spawn(move || {

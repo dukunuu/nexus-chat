@@ -7,7 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-nexus-chat-core = { path = "../core" }
+nexus-chat-core = { path = "../core", features = ["native-dialogs"] }
 anyhow = { workspace = true }
 image = { workspace = true }
 serde = { workspace = true }

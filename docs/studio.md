@@ -9,7 +9,9 @@ fields, font picking/import and a drag-to-reparent layers tree; details and
 remaining limitations are under *Editor status*. D2 adds typed slide transitions and node builds (schema, validation, three
 operations), an Animate panel and step-based presentation playback; see
 *Animations*. Terminal-theme identity and revised comments are implemented. Docs open in studio
-too (*The doc editor*); the link is at version 2.
+too (*The doc editor*); the link is at version 2. A **Library** lists every deck and doc,
+and Open, Export, Save a copy and Add template use native file dialogs (*The Library and the
+file dialogs*).
 Supersedes the editor half of `docs/web-editors.md`; that
 document's device-key pairing stays the plan for remote access (phase S5).
 
@@ -50,7 +52,8 @@ to a conversation.
 | Terminal side of the link | `crates/tui/src/studio.rs`, `/studio` | spawns studio, turns comments into messages, tells it what the model changed |
 | Desktop app | `crates/studio` (package `nexus-studio`, `publish = false` until S3) | `tao` window + `wry` webview; the Rust backend owns the deck file |
 | Studio UI | `crates/studio/ui/` | HTML/CSS/vanilla JS modules embedded with `include_str!`; no Node build step |
-| Launcher | `nexus studio [path]` in `crates/tui/src/cli.rs` | runs `nexus-studio` from PATH or beside the `nexus` binary |
+| Launcher | `nexus studio [path]` in `crates/tui/src/cli.rs` | runs `nexus-studio` from PATH or beside the `nexus` binary; with no path the window opens on the Library |
+| Library and dialogs | `crates/core/src/canvas/`, `crates/studio/src/backend/library.rs`, `crates/studio/ui/library.{js,css}` | the listing, file operations and the `Dialogs` trait are core's (shared by studio, `/library` and `nexus library`); studio adds the window's commands and the page |
 
 ### Terminal identity and comments
 
@@ -120,7 +123,9 @@ is no sync protocol for it:
 The webview UI is untrusted presentation. It reaches the backend only through
 one IPC channel (`window.ipc.postMessage` → a typed JSON command enum in Rust),
 and the backend answers with events. The UI never gets file paths outside the
-opened deck's folder, and has no network access: a strict CSP
+opened deck's folder (a Library card names its file by its path inside the space, which the
+backend re-checks, and the only other path it is ever told is one a native dialog just returned),
+and has no network access: a strict CSP
 (`default-src 'self'; img-src 'self' data: nexus:`) plus a custom `nexus://`
 protocol that serves only the embedded UI and the deck's own assets. Remote
 images in decks go through `nexus_core::remote_image` (the same vetted fetcher
@@ -445,7 +450,8 @@ offline and deterministically (same deck, same bytes). Studio's Export menu, the
 pptx|pdf|png|html|json [--out path]` all call it. The default destination is
 `<space files>/exports/<deck-slug>.<ext>`; an existing name gets ` (2)`, ` (3)`
 and so on, never an overwrite. `Exported {path, warnings}` lists every
-approximation; `Reveal {path}` only opens files this window exported, through an
+approximation; `ExportAs {format, template?}` asks first (see *The Library and the file
+dialogs*) and replaces what the dialog confirmed; `Reveal {path}` only opens files this window exported, through an
 argv (`open -R`, `xdg-open <dir>`, `explorer /select,`), never a shell.
 
 - **PPTX** is hand-written OOXML. Every node sits at its resolved `layout_at`
@@ -770,6 +776,76 @@ or play animations anywhere but present mode. Smart text/font/color changes cros
 color channels, to keep playback compositor-only. Font previews use the
 webview's installed faces, so platform font availability still matters.
 
+## The Library and the file dialogs
+
+Decks live in `<space files>/decks/*.deck.json` and docs in `docs/*.doc.json`. The **Library** is
+the way to find them again: a full-window layer above both modes that studio shows when it starts
+with no file (`nexus studio`, or `nexus-studio` with no path) and from the **Library** button or
+Cmd/Ctrl+O in deck and doc mode. It follows the terminal chrome.
+
+- **Core.** `nexus_core::canvas::library(files)` returns every deck and doc, newest first, as
+  `Entry { kind, path, relative, title, modified, count, design, revision, thumbnail }`: `relative`
+  is the path inside the space (`decks/q3.deck.json`), `count` the slides or blocks, `design` the
+  design's name, and `thumbnail` the cache file for this revision (`None` for an empty deck).
+  `.history`, `.renders`, `.trash` and `assets` folders, hidden files, symlinks and files that do
+  not validate are left out. `ensure_thumbnail` draws it on first use: the first slide through the
+  same cache the `canvas` tool's `view` uses (`decks/.renders/<stem>/<slide hex>-<rev8>.png`), or
+  page one of a doc at 800 px (`docs/.renders/<stem>/thumb-<rev8>.png`, older ones removed).
+  Studio, `/library` and `nexus library` all list through it.
+- **The page.** A grid of cards (thumbnail, a Deck or Doc badge, title, slide or block count,
+  "3 hours ago", "Open now" on the file in the window), All / Decks / Docs tabs with counts, a title
+  search (Esc clears it), **Open…**, **New doc** and **New deck**. Click, Enter or the arrow keys
+  open a card; hover shows a **…** menu (also on right click): Open, Reveal in Finder (Show in
+  Explorer, Show in folder), Duplicate (`<stem>-copy`, titled "… copy"), Rename in place, Export ▸
+  (the formats of its kind, through the Save dialog), and Delete after a confirm. A delete moves the
+  file, its comments and its kept versions to `<space files>/.trash/<when>/`; Rust's standard library
+  cannot reach the operating system's trash. Notices show above the library while it is open.
+  While it is open the page behind it is inert and its keys never reach the canvas or the editor.
+  `Backend::launch` (used with no file argument) keeps a blank deck in memory, so starting studio
+  never leaves an empty file in the library; the first edit writes it.
+- **IPC.** `Library {}` → `Library {items, current, home, selected, notice}`. Items carry
+  `relative`, never an absolute path, and a `/library/<key>.png` thumbnail URL served only for the
+  last listing's revisions (drawn off the backend lock, one at a time). `LibraryOpen`,
+  `LibraryReveal`, `LibraryRename {path, title}`, `LibraryDuplicate`, `LibraryDelete` and
+  `LibraryExport {path, format}` take such a `relative` path and re-check it (`canvas::files::resolve`:
+  `decks/…/*.deck.json` or `docs/…/*.doc.json`, nothing hidden, no `assets`, no symlinks). The open
+  file is renamed through its own undo history. `Deck` and `Doc` events carry `home`, true until a
+  document is opened or written.
+- **Dialogs.** `OpenDialog {}`, `ExportAs {format, template?}`, `SaveCopy {}` and `PickTemplate {}`
+  ask the operating system and answer with the usual event (`Deck`, `Doc`, `Exported`, `Saved
+  {path, assets}`, `TemplateImported`) or `Idle {}` when the user cancels, which changes nothing.
+  **Export…** pre-fills `<title>.<ext>` and starts in the folder this space last exported to
+  (`studio-settings.json` at the data root); the file is replaced atomically, since the dialog
+  already asked, and Markdown's images go into an `assets/` folder beside it. **Open…** is filtered
+  to `.deck.json`, `.doc.json`, `.pptx`, `.docx` and `.md`: nexus files open as they are, a
+  PowerPoint file imports as a new deck in `decks/`, a Word or Markdown file as a new doc in
+  `docs/` (the approximations show as a notice). **Save a copy…** writes the deck or doc as
+  `.deck.json` / `.doc.json` with the `assets/` files it uses in an `assets/` folder beside the
+  copy. **Add template…** replaces the file-chooser byte transfer (a dropped file still travels as
+  bytes). "Save to exports/ without asking" in the Export menu (remembered on this device) keeps the
+  old one-click export; `Export` and `DocExport` without a dialog are unchanged.
+- **Main thread.** A dialog never runs inside the `tao` event loop's callback, where macOS's nested
+  modal loop could meet the loop's own locks. A dialog command is two steps with the dialog between:
+  `Backend::prepare_dialog` works out what to ask (a `DialogJob`), a helper thread calls
+  `DialogJob::ask`, and `rfd` hands the panel to the main thread (macOS requires the main thread for
+  `NSOpenPanel` and `NSSavePanel`), which shows it from the top-level run loop. The answer returns as
+  a `Message::Dialog` user event and `Backend::finish_dialog` replies to the command that asked. The
+  backend and the event handler stay free while a dialog is open (polling continues; the page's
+  command queue waits for the reply). The `Dialogs` trait (`canvas::dialogs`) keeps this swappable:
+  tests call `dispatch`, which asks in place, with a `Scripted` fake, so no test opens a window. The
+  dependency is `rfd` 0.17 with only `xdg-portal` on Linux (no GTK or Wayland headers needed to build
+  nexus) behind core's `native-dialogs` feature, enabled by studio and the TUI. The TUI asks inline
+  on its main thread, where `rfd` shows the panel directly.
+- **The terminal.** `/library` (`decks`, `lib`) lists the same files in a popup: Enter opens one in
+  studio (which links the window), `e` asks for a format (`p` pptx, `f` pdf, `g` png zip, `h` html,
+  `j` json for a deck; `w` docx, `f`, `m` md, `h` for a doc) and exports through the Save dialog (with
+  no desktop session, such as over SSH, to `exports/` with a status line), `d` asks and moves the file
+  to `.trash/`. `/studio` with no file and nothing shown yet opens `/library` instead. The `canvas`
+  tool's `export` takes an absolute destination in its existing `format` argument (its extension picks
+  the format), only when that exact path is in the user's latest message, and never overwrites;
+  everything else stays confined to `exports/`. `nexus library [--kind deck|doc] [--json]` prints the
+  listing.
+
 ## The doc editor
 
 Opening a `*.doc.json` (`nexus-studio docs/q3.doc.json`, `--attach`, `/studio`, or
@@ -856,9 +932,8 @@ operations; this is what the window does.
 - **Known gaps.** Chart data and image alt text are edited through nexus, not the
   window. Deleting a selection that reaches into a code block or a table clears
   the covered text rather than merging blocks. Dragging text between blocks is not
-  supported (a drop only takes image files). A doc window has no Open… or New of
-  its own yet (`/studio <file>` switches, as nexus does when the model edits another
-  file), and `.docx` import is the CLI's (`nexus doc`). The page was exercised in
+  supported (a drop only takes image files). The Library (Cmd/Ctrl+O) opens, creates and
+  imports from a doc window too (`.docx` and `.md` through Open…, or `nexus doc`). The page was exercised in
   Chromium; WebKit, the app's real webview, differs in caret and `beforeinput`
   details, so it needs a pass in the app itself.
 
@@ -951,6 +1026,15 @@ operations; this is what the window does.
   `ui-dev/shots/toolbar-before-1150-{default,light}.png`,
   `toolbar-after-review-{1150,1280,1440}-{default,light}-{middle,top,right}-{fit,0.5,2}.png`, `toolbar-overflow-420-{default,light}.png` and
   `toolbar-geometry.json`.
+- **Library and dialogs:** `canvas/tests.rs` (core: listing, order, exclusions, thumbnail cache keys,
+  rename, duplicate, delete, save a copy, the settings), `backend/library_tests.rs` (every library
+  command, each dialog with the `Scripted` fake: the pre-filled name and start folder, a cancel,
+  replace, assets beside a Markdown export, open for each file type, no absolute path on the wire),
+  `tools/canvas/export_path_tests.rs`, the popup tests in `ui/popups/library_tests.rs`, `cli_library.rs`,
+  `node crates/studio/ui-dev/library-shot.mjs` (shots of the library, empty, full, filtered, with a
+  menu, as the start page, narrow, and in deck mode, in both palettes, into `ui-dev/shots/`) and the
+  `library*` and `nativeDialogs*` scenarios of `node crates/studio/ui-dev/doc-e2e.mjs`, which run
+  against `library-mock.js`.
 - **Doc editor:** `backend/doc_tests.rs` (open, one undo step per apply, undo and
   redo on disk, an external edit as one undo step listing its blocks, the file
   winning, every comment command and suggestion, exports, pages, confined image

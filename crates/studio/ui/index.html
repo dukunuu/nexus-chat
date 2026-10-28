@@ -6,19 +6,20 @@
   <title>nexus studio</title>
   <link rel="stylesheet" href="/studio.css">
   <link rel="stylesheet" href="/doc/doc.css">
+  <link rel="stylesheet" href="/library.css">
   <script type="module" src="/app.js"></script>
 </head>
 <body>
   <header id="topbar">
-    <div class="brand">nexus <span>studio</span></div><span class="divider"></span>
-    <div class="deck-menu"><button id="deck-title" aria-label="Project menu" aria-haspopup="true" aria-expanded="false"><span id="deck-title-label">Untitled</span><span data-icon="chevron"></span></button><div id="deck-menu" class="popover" hidden><button id="rename-deck">Rename</button><button id="new-deck">New deck</button><button id="open-deck">Open…</button></div></div>
+    <div class="brand">nexus <span>studio</span></div><button id="open-library" class="library-button" data-icon="library" aria-label="Library" title="Library (⌘/Ctrl+O)">Library</button><span class="divider"></span>
+    <div class="deck-menu"><button id="deck-title" aria-label="Project menu" aria-haspopup="true" aria-expanded="false"><span id="deck-title-label">Untitled</span><span data-icon="chevron"></span></button><div id="deck-menu" class="popover" hidden><button id="rename-deck">Rename</button><button id="new-deck">New deck</button><button id="new-doc">New doc</button><button id="open-deck">Open…</button><button id="save-copy">Save a copy…</button></div></div>
     <span id="save" class="save-state" title="Every change is saved to the deck file as you make it"><span id="dirty">Opening…</span></span>
     <span class="spacer"></span>
     <span id="link-status" class="link-pill">not linked</span>
     <button id="toggle-comments" data-icon="comment">Comments <span id="comment-count" class="count">0</span></button>
     <span class="divider"></span><button id="undo" class="icon-button" data-icon="undo" aria-label="Undo" title="Undo (⌘/Ctrl+Z)"></button><button id="redo" class="icon-button" data-icon="redo" aria-label="Redo" title="Redo (⇧⌘/Ctrl+Z)"></button>
     <div class="template-menu"><button id="deck-design" aria-haspopup="dialog" aria-expanded="false">Design</button><div id="deck-design-pop" class="popover" role="dialog" aria-label="Design" hidden><div id="deck-design-info"></div><div id="deck-design-list"></div><button id="add-template">Add template…</button></div></div>
-    <button id="present" data-icon="play">Present</button><div class="export-menu"><button id="export" class="primary" data-icon="export" aria-haspopup="menu" aria-expanded="false" aria-controls="export-menu">Export</button><div id="export-menu" class="popover" role="menu" aria-label="Export format" hidden><button role="menuitem" tabindex="-1" data-format="pptx">PowerPoint (.pptx)</button><button role="menuitem" tabindex="-1" data-format="pdf">PDF</button><button role="menuitem" tabindex="-1" data-format="png">PNG images (.zip)</button><button role="menuitem" tabindex="-1" data-format="html">HTML presentation</button><button role="menuitem" tabindex="-1" data-format="json">Deck JSON</button><button role="menuitemcheckbox" tabindex="-1" id="export-template" aria-checked="false">Into template</button><button role="menuitem" tabindex="-1" id="export-plain">Plain file</button><button role="menuitem" tabindex="-1" id="export-to">Export to…</button></div></div>
+    <button id="present" data-icon="play">Present</button><div class="export-menu"><button id="export" class="primary" data-icon="export" aria-haspopup="menu" aria-expanded="false" aria-controls="export-menu">Export</button><div id="export-menu" class="popover" role="menu" aria-label="Export format" hidden><button role="menuitem" tabindex="-1" data-format="pptx">PowerPoint (.pptx)</button><button role="menuitem" tabindex="-1" data-format="pdf">PDF</button><button role="menuitem" tabindex="-1" data-format="png">PNG images (.zip)</button><button role="menuitem" tabindex="-1" data-format="html">HTML presentation</button><button role="menuitem" tabindex="-1" data-format="json">Deck JSON</button><button role="menuitemcheckbox" tabindex="-1" id="export-template" aria-checked="false">Into template</button><button role="menuitemcheckbox" tabindex="-1" id="export-quick" aria-checked="false">Save to exports/ without asking</button></div></div>
   </header>
   <main>
     <section id="workspace">
@@ -34,6 +35,7 @@
       <aside id="comments-panel" class="side-panel" hidden><div class="side-heading"><strong>Comments <span id="review-count" class="count"></span></strong><button id="close-comments" class="icon-button" data-icon="x" aria-label="Close comments"></button></div><div class="comment-filters"><button id="filter-open" aria-pressed="true">Open</button><button id="filter-resolved" aria-pressed="false">Resolved</button></div><label class="resolved-toggle"><input id="show-resolved" type="checkbox"> Show resolved pins</label><div id="comments-list"></div></aside>
     </section>
   </main>
+  <div id="library" hidden></div>
   <dialog id="path-dialog"><form method="dialog"><h2 id="path-heading">Open deck</h2><label id="path-label" for="path-input">Path</label><input id="path-input" required autocomplete="off"><p id="path-hint"></p><div class="dialog-actions"><button value="cancel" formnovalidate>Cancel</button><button id="path-confirm" class="primary" value="ok">Open</button></div></form></dialog>
   <dialog id="export-details" aria-labelledby="export-details-heading"><h2 id="export-details-heading">Export approximations</h2><ul id="export-warnings"></ul><form method="dialog"><div class="dialog-actions"><button value="close">Close</button></div></form></dialog>
   <div id="doc-app" hidden></div>

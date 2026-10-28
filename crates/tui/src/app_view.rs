@@ -296,6 +296,10 @@ pub struct AppView {
     /// Selected failure mode in the `/harness` popup.
     pub harness_selected: usize,
     pub jobs_popup: crate::ui::popups::jobs::JobsPopup,
+    /// The `/library` popup: the space's decks and docs, cursor and mode.
+    pub library: crate::ui::popups::library::LibraryPopup,
+    /// The Open and Save dialogs the library's export asks (scripted in tests).
+    pub dialogs: Box<dyn nexus_core::canvas::dialogs::Dialogs>,
     /// The `/connectors` popup: mode, cursors, add form and import rows.
     pub connectors_popup: crate::ui::popups::connectors::ConnectorsPopup,
     /// Background-process popup selection, output view and kill confirmation.
@@ -555,6 +559,8 @@ impl AppView {
             usage_scroll: 0,
             harness_selected: 0,
             jobs_popup: crate::ui::popups::jobs::JobsPopup::default(),
+            library: crate::ui::popups::library::LibraryPopup::default(),
+            dialogs: crate::ui::popups::library::default_dialogs(),
             connectors_popup: crate::ui::popups::connectors::ConnectorsPopup::default(),
             procs_selected: 0,
             procs_output: None,

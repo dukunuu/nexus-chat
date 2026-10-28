@@ -4,7 +4,7 @@
 // the "/" menu, comments and suggestions, cross-block deletes, paste, undo, external
 // edits, page preview and the design and export panels. Writes shots to shots/.
 import assert from 'node:assert/strict';
-import { open, shot, finish, fixture } from './doc-harness.mjs';
+import { open, shot, finish, fixture, libraryMock } from './doc-harness.mjs';
 
 const part = (page, block, path = 'text') => page.locator(`[data-block="${block}"] [data-part="${path}"]`);
 const mockDoc = page => page.evaluate(() => window.__mock.doc);
@@ -742,6 +742,216 @@ Object.assign(tests, {
     await page.keyboard.type('Tail');
     await settle(page);
     assert.equal((await blockOf(page, 'b20')).text, 'Methodology notes live in the shared drive.Tail');
+    await page.close();
+  },
+});
+Object.assign(tests, {
+  async libraryOpensFromTheBarAndTheKeyboard() {
+    const page = await open('dark', undefined, { scripts: [libraryMock] });
+    assert.equal(await page.locator('#library').isVisible(), false);
+    await page.getByRole('button', { name: 'Library', exact: true }).click();
+    await page.locator('#library .lib-card').first().waitFor();
+    assert.equal(await page.locator('#library .lib-card').count(), 9);
+    assert.equal(await page.locator('#doc-app').evaluate(n => n.inert), true, 'the page behind it cannot take focus or keys');
+    assert.equal(await page.locator('#library .lib-card.current').count(), 1);
+    assert.match(await page.locator('#library .lib-card.current .lib-sub').textContent(), /Open now/);
+    // Keys typed in the library never reach the editor's or canvas's handlers.
+    await page.keyboard.press('ArrowDown'); await page.keyboard.press('Delete'); await page.keyboard.press('Backspace');
+    assert.equal(await page.evaluate(() => window.__mock.commands.filter(c => c.command === 'DocApply').length), 0);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#library').isVisible(), false);
+    assert.equal(await page.locator('#doc-app').evaluate(n => n.inert), false);
+    // Cmd/Ctrl+O toggles it, from anywhere.
+    await page.keyboard.press('Control+o');
+    assert.equal(await page.locator('#library').isVisible(), true);
+    await page.keyboard.press('Control+o');
+    assert.equal(await page.locator('#library').isVisible(), false);
+    await page.close();
+  },
+  async libraryFiltersSearchesAndOpensWithTheKeyboard() {
+    const page = await open('dark', undefined, { scripts: [libraryMock] });
+    await page.keyboard.press('Control+o');
+    await page.locator('#library .lib-card').first().waitFor();
+    const cards = () => page.locator('#library .lib-card .lib-title').allTextContents();
+    await page.getByRole('button', { name: /^Decks/ }).click();
+    assert.equal((await cards()).length, 5);
+    await page.getByRole('button', { name: /^Docs/ }).click();
+    assert.equal((await cards()).length, 4);
+    assert.equal(await page.getByRole('button', { name: /^Docs/ }).getAttribute('aria-pressed'), 'true');
+    await page.getByRole('button', { name: /^All/ }).click();
+    await page.locator('#library .lib-search').fill('NOTES');
+    assert.deepEqual(await cards(), ['Research notes on retention and onboarding for the winter cohort']);
+    assert.equal(await page.locator('#library .lib-count').textContent(), '1 of 9');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#library .lib-search').inputValue(), '', 'Escape clears the search first');
+    assert.equal(await page.locator('#library').isVisible(), true);
+    assert.equal((await cards()).length, 9);
+    await page.locator('#library .lib-search').fill('zzz');
+    await page.locator('#library .lib-empty h2').waitFor();
+    assert.match(await page.locator('#library .lib-empty h2').textContent(), /No decks or docs match “zzz”/);
+    await page.getByRole('button', { name: 'Clear search' }).click();
+    assert.equal((await cards()).length, 9);
+    // Arrows move between cards, Enter opens one.
+    await page.locator('#library .lib-search').focus();
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => window.__library.commands.some(c => c.command === 'LibraryOpen'));
+    const open1 = await page.evaluate(() => window.__library.commands.find(c => c.command === 'LibraryOpen'));
+    assert.deepEqual(open1, { command: 'LibraryOpen', path: 'decks/launch.deck.json' });
+    await page.locator('#library').waitFor({ state: 'hidden' });
+    await page.close();
+  },
+  async libraryCardMenuRenamesDuplicatesExportsAndDeletes() {
+    const page = await open('dark', undefined, { scripts: [libraryMock] });
+    await page.keyboard.press('Control+o');
+    await page.locator('#library .lib-card').first().waitFor();
+    const sent = () => page.evaluate(() => window.__library.commands);
+    const card = title => page.locator('#library .lib-card', { has: page.getByText(title, { exact: true }) });
+    const menuFor = async title => { const c = card(title); await c.hover(); await c.locator('.lib-more').click(); return page.locator('.lib-menu'); };
+    let menu = await menuFor('Launch review');
+    const labels = (await menu.getByRole('menuitem').allTextContents()).slice(0, 5);
+    assert.deepEqual([labels[0], labels[2], labels[3], labels[4]], ['Open', 'Duplicate', 'Rename', 'Export']);
+    assert.match(labels[1], /^(Reveal in Finder|Show in Explorer|Show in folder)$/);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('.lib-menu').count(), 0, 'Escape closes the menu, not the library');
+    assert.equal(await page.locator('#library').isVisible(), true);
+    // Reveal
+    menu = await menuFor('Launch review');
+    await menu.getByRole('menuitem', { name: /Reveal|Show in/ }).click();
+    assert.deepEqual((await sent()).at(-1), { command: 'LibraryReveal', path: 'decks/launch.deck.json' });
+    // Duplicate: the copy appears first and is highlighted.
+    menu = await menuFor('Launch review');
+    await menu.getByRole('menuitem', { name: 'Duplicate' }).click();
+    await page.locator('#library .lib-card.fresh').waitFor();
+    assert.equal(await page.locator('#library .lib-card.fresh .lib-title').textContent(), 'Launch review copy');
+    assert.equal(await page.locator('#library .lib-card').count(), 10);
+    assert.equal(await page.locator('.lib-toast').textContent(), 'Duplicated');
+    // Rename in place: Escape cancels, Enter commits.
+    menu = await menuFor('Launch review copy');
+    await menu.getByRole('menuitem', { name: 'Rename' }).click();
+    const input = page.locator('#library .lib-rename');
+    assert.equal(await input.inputValue(), 'Launch review copy');
+    await input.fill('Nope'); await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#library .lib-rename').count(), 0);
+    assert.equal(await page.locator('#library').isVisible(), true, 'Escape in the field only cancels the rename');
+    assert.ok(!(await sent()).some(c => c.command === 'LibraryRename'));
+    menu = await menuFor('Launch review copy');
+    await menu.getByRole('menuitem', { name: 'Rename' }).click();
+    await page.locator('#library .lib-rename').fill('  Launch v2 ');
+    await page.keyboard.press('Enter');
+    await page.locator('#library .lib-title', { hasText: 'Launch v2' }).waitFor();
+    assert.deepEqual((await sent()).find(c => c.command === 'LibraryRename'), { command: 'LibraryRename', path: 'decks/launch-copy.deck.json', title: 'Launch v2' });
+    // Export: the formats of the kind, through the Save dialog.
+    menu = await menuFor('Launch v2');
+    await menu.getByRole('menuitem', { name: 'Export' }).click();
+    assert.deepEqual(await menu.locator('.sub').allTextContents(), ['PowerPoint.pptx', 'PDF.pdf', 'PNG images.zip', 'Web presentation.html', 'Deck JSON.json']);
+    await shot(page, 'library-menu-export');
+    await menu.getByRole('menuitem', { name: /^PDF/ }).click();
+    await page.locator('.lib-toast', { hasText: 'Exported Launch v2.pdf' }).waitFor();
+    assert.deepEqual((await sent()).find(c => c.command === 'LibraryExport'), { command: 'LibraryExport', path: 'decks/launch-copy.deck.json', format: 'pdf' });
+    await page.locator('.lib-toast').getByRole('button', { name: 'Reveal' }).waitFor();
+    menu = await menuFor('Q3 strategy');
+    await menu.getByRole('menuitem', { name: 'Export' }).click();
+    assert.deepEqual(await menu.locator('.sub').allTextContents(), ['Word.docx', 'PDF.pdf', 'Markdown.md', 'Web page.html']);
+    await page.keyboard.press('Escape');
+    // Delete asks first.
+    menu = await menuFor('Launch v2');
+    await menu.getByRole('menuitem', { name: 'Delete' }).click();
+    await page.locator('dialog.lib-dialog[open]').waitFor();
+    assert.match(await page.locator('.lib-dialog h2').textContent(), /Delete “Launch v2”\?/);
+    await shot(page, 'library-delete-confirm');
+    await page.getByRole('button', { name: 'Cancel' }).click();
+    assert.ok(!(await sent()).some(c => c.command === 'LibraryDelete'));
+    assert.equal(await page.locator('#library').isVisible(), true, 'Escape in the dialog closes only the dialog');
+    menu = await menuFor('Launch v2');
+    await menu.getByRole('menuitem', { name: 'Delete' }).click();
+    await page.keyboard.press('Escape');
+    assert.ok(!(await sent()).some(c => c.command === 'LibraryDelete'));
+    menu = await menuFor('Launch v2');
+    await menu.getByRole('menuitem', { name: 'Delete' }).click();
+    await page.locator('.lib-dialog').getByRole('button', { name: 'Delete' }).click();
+    await page.locator('#library .lib-title', { hasText: 'Launch v2' }).waitFor({ state: 'detached' });
+    assert.deepEqual((await sent()).find(c => c.command === 'LibraryDelete'), { command: 'LibraryDelete', path: 'decks/launch-copy.deck.json' });
+    // The right button opens the same menu.
+    await card('Roadmap 2027').click({ button: 'right' });
+    assert.equal(await page.locator('.lib-menu').count(), 1);
+    await page.close();
+  },
+  async libraryIsTheStartPageWhenNothingIsOpen() {
+    const page = await open('dark', undefined, { scripts: ['window.__libraryHome = true; window.__libraryCurrent = null;', libraryMock] });
+    await page.locator('#library .lib-card').first().waitFor();
+    assert.equal(await page.locator('#library').isVisible(), true);
+    assert.equal(await page.locator('#library .lib-close').isVisible(), false, 'there is nothing to go back to');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#library').isVisible(), true);
+    await page.getByRole('button', { name: 'New doc', exact: true }).click();
+    await page.locator('#library').waitFor({ state: 'hidden' });
+    assert.ok((await page.evaluate(() => window.__library.commands)).some(c => c.command === 'NewDoc' && c.title === 'Untitled'));
+    assert.equal(await page.locator('#doc-surface').isVisible(), true);
+    // Once a document is open, the library can be closed again.
+    await page.keyboard.press('Control+o');
+    await page.locator('#library .lib-card').first().waitFor();
+    assert.equal(await page.locator('#library .lib-close').isVisible(), true);
+    await page.locator('#library .lib-close').click();
+    assert.equal(await page.locator('#library').isVisible(), false);
+    await page.close();
+  },
+  async libraryEmptyOffersNewFilesAndHidesTheSearch() {
+    const page = await open('dark', undefined, { scripts: ['window.__libraryItems = [];', libraryMock] });
+    await page.keyboard.press('Control+o');
+    await page.locator('#library .lib-empty h2').waitFor();
+    assert.equal(await page.locator('#library .lib-search').isVisible(), false);
+    assert.equal(await page.locator('#library .lib-empty').getByRole('button').count(), 2);
+    await page.locator('#library .lib-empty').getByRole('button', { name: 'New deck' }).click();
+    assert.ok((await page.evaluate(() => window.__library.commands)).some(c => c.command === 'NewDeck'));
+    await page.close();
+  },
+  async nativeDialogsReplaceTheTypedPathsAndCancelDoesNothing() {
+    const page = await open('dark', undefined, { scripts: [libraryMock] });
+    const sent = () => page.evaluate(() => window.__library.commands);
+    // Open… in the library asks the operating system; a cancel leaves everything as it was.
+    await page.keyboard.press('Control+o');
+    await page.locator('#library .lib-card').first().waitFor();
+    await page.getByRole('button', { name: 'Open a file from disk' }).click();
+    await page.waitForFunction(() => window.__library.commands.some(c => c.command === 'OpenDialog'));
+    await page.waitForTimeout(60);
+    assert.equal(await page.locator('#library').isVisible(), true, 'cancelled: still the library');
+    assert.equal(await page.locator('dialog[open]').count(), 0, 'no typed-path dialog');
+    await page.keyboard.press('Escape');
+    // Export asks where; the old behavior is one checkbox away.
+    await page.getByRole('button', { name: 'Export' }).click();
+    const quick = page.locator('.export-pop').getByRole('menuitemcheckbox', { name: /without asking/ });
+    assert.equal(await quick.getAttribute('aria-checked'), 'false');
+    await shot(page, 'library-doc-export-menu');
+    await page.locator('.export-pop .menu-row', { hasText: 'Markdown' }).click();
+    await page.locator('.doc-toast', { hasText: 'Exported Export.md' }).waitFor();
+    assert.deepEqual((await sent()).at(-1), { command: 'ExportAs', format: 'md' });
+    await page.getByRole('button', { name: 'Export' }).click();
+    await page.locator('.export-pop').getByRole('menuitemcheckbox', { name: /without asking/ }).click();
+    assert.equal(await page.evaluate(() => localStorage.getItem('nexus-quick-export')), '1');
+    assert.equal(await page.locator('.export-pop').getByRole('menuitemcheckbox', { name: /without asking/ }).getAttribute('aria-checked'), 'true');
+    await page.locator('.export-pop .menu-row', { hasText: 'PDF' }).click();
+    await page.locator('.doc-toast', { hasText: 'Exported q3-strategy.pdf' }).waitFor();
+    assert.deepEqual((await page.evaluate(() => window.__mock.commands.filter(c => c.command === 'DocExport'))).at(-1), { command: 'DocExport', format: 'pdf' });
+    // Save a copy and Add template go through the dialogs too.
+    await page.getByRole('button', { name: 'Export' }).click();
+    await page.locator('.export-pop').getByRole('menuitem', { name: /Save a copy/ }).click();
+    await page.locator('.doc-toast', { hasText: 'Saved a copy: copy.deck.json with 2 assets' }).waitFor();
+    assert.deepEqual((await sent()).at(-1), { command: 'SaveCopy' });
+    await page.getByRole('button', { name: 'Design' }).click();
+    await page.getByRole('button', { name: 'Add template…', exact: true }).click();
+    await page.locator('.doc-toast', { hasText: 'Imported Brand' }).waitFor();
+    assert.deepEqual((await sent()).at(-1), { command: 'PickTemplate' });
+    assert.ok(!(await page.evaluate(() => window.__mock.commands.some(c => c.command === 'ImportTemplateData'))), 'no bytes travel through the page');
+    // Cancelling every dialog does nothing: no toast, no change.
+    await page.evaluate(() => { localStorage.removeItem('nexus-quick-export'); window.__library.state.cancel = true; document.querySelector('.doc-toast').hidden = true; });
+    await page.getByRole('button', { name: 'Export' }).click();
+    await page.locator('.export-pop .menu-row', { hasText: 'Word' }).click();
+    await page.waitForFunction(() => window.__library.commands.filter(c => c.command === 'ExportAs').length === 2);
+    await page.waitForTimeout(100);
+    assert.equal(await page.locator('.doc-toast').isVisible(), false);
+    assert.equal(await page.evaluate(() => window.__mock.undoDepth), 0);
     await page.close();
   },
 });

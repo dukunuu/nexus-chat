@@ -120,7 +120,7 @@ fn new_doc_path(files_dir: &Path) -> Result<PathBuf> {
 }
 
 /// The space's `docs/` folder, created and checked to stay inside the space.
-fn docs_dir(files_dir: &Path) -> Result<PathBuf> {
+pub(super) fn docs_dir(files_dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(files_dir)?;
     let root = files_dir.canonicalize()?;
     let docs = root.join("docs");
@@ -226,11 +226,12 @@ impl Backend {
             linked: self.linked,
             activities: self.thread_activities(),
             changed: Vec::new(),
-            notice: None,
+            notice: self.doc_notice.borrow_mut().take(),
             assets: self.doc_asset_hashes(&session.doc),
             design: self.design_state(&session.doc),
             can_undo: !session.undo.is_empty(),
             can_redo: !session.redo.is_empty(),
+            home: self.home.get(),
         }
     }
 
@@ -314,6 +315,7 @@ impl Backend {
     }
 
     pub(super) fn enter_doc(&mut self, path: PathBuf, doc: Doc) -> Result<()> {
+        self.home.set(false);
         let root = asset_root(&path)?;
         atomic_write(&self.recent, &serde_json::to_vec(&path)?)?;
         self.path = path;
@@ -365,6 +367,7 @@ impl Backend {
 
     /// Write the doc file, first keeping the version it replaces in history.
     fn write_doc(&self, doc: &Doc) -> Result<()> {
+        self.home.set(false);
         // History is a safety net: failing to keep a version must not block a save.
         let _ = history::record_before_write_for::<Doc>(
             &self.path,
@@ -559,45 +562,48 @@ impl Backend {
         template: Option<&str>,
     ) -> Result<Event> {
         let format: doc::export::Format = format.parse()?;
-        let assets = asset_root(&self.path)?;
         let session = self.session()?;
-        let output = if format == doc::export::Format::Md {
-            // Markdown names images beside it, so the images are copied into
-            // `exports/assets/` by content, as the canvas tool does.
-            let mut exported = session.doc.clone();
-            let target = self.files_dir.join("exports/assets");
-            for block in &mut exported.blocks {
-                if let BlockKind::Image { src, .. } = &mut block.kind
-                    && !src.starts_with("https://")
-                {
-                    let bytes = read_bounded(
-                        &assets.join(src.strip_prefix("assets/").unwrap_or(src)),
-                        usize::try_from(nexus_core::deck::assets::MAX_IMAGE_BYTES)?,
-                    )?;
-                    *src =
-                        nexus_core::deck::assets::store_image_bytes(&bytes, src, "image", &target)?;
-                }
-            }
-            let mut output =
-                doc::export::export(&session.doc, Some(&assets), &session.threads, format)?;
-            output.bytes = doc::markdown::export(&exported).into_bytes();
-            output
-        } else {
-            nexus_core::design::template::export_doc(
-                &session.doc,
-                Some(&assets),
-                &session.threads,
-                &self.files_dir,
-                format,
-                template,
-            )?
-        };
+        // Markdown names its images beside it, so they are copied into
+        // `exports/assets/` by content, as the canvas tool does.
+        let output = self.doc_output(
+            &session.doc,
+            &session.threads,
+            &self.path,
+            format,
+            template,
+            &self.files_dir.join("exports/assets"),
+        )?;
         let path = nexus_core::deck::export::write_export(&output, &self.files_dir, path)?;
         self.exports.push(path.clone());
         Ok(Event::Exported {
             path,
             warnings: output.warnings,
         })
+    }
+
+    /// A doc as a file in `format`, not yet written anywhere. Markdown's images
+    /// are copied by content into `md_images`.
+    pub(super) fn doc_output(
+        &self,
+        doc: &Doc,
+        threads: &[comments::Thread],
+        path: &Path,
+        format: doc::export::Format,
+        template: Option<&str>,
+        md_images: &Path,
+    ) -> Result<nexus_core::deck::export::Export> {
+        // The assets folder is checked (and made) the way every deck and doc
+        // operation does before anything reads from it.
+        asset_root(path)?;
+        nexus_core::canvas::files::doc_output(
+            &self.files_dir,
+            doc,
+            threads,
+            path,
+            format,
+            template,
+            md_images,
+        )
     }
 
     // -- page preview ----------------------------------------------------------

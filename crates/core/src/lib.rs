@@ -15,6 +15,7 @@
 pub mod app;
 pub mod app_templates;
 pub mod appserver;
+pub mod canvas;
 pub mod citations;
 pub mod config;
 pub mod connectors;

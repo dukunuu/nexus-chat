@@ -52,6 +52,9 @@ const paths = {
   italic: 'M10 3h10M4 21h10M15 3 9 21', chevron: 'm8 4 8 8-8 8',
   send: 'm12 20 0-16m-6 6 6-6 6 6', check: 'm4 12 5 5L20 5', x: 'm5 5 14 14M5 19 19 5',
   sparkle: 'm12 2 3 7 7 3-7 3-3 7-3-7-7-3 7-3Z',
+  library: 'M3 4h7v7H3Zm11 0h7v7h-7ZM3 15h7v5H3Zm11 0h7v5h-7Z', folder: 'M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z',
+  search: 'm20 20-4.5-4.5M10.5 17a6.5 6.5 0 1 1 0-13 6.5 6.5 0 0 1 0 13Z', 'file-deck': 'M3 5h18v12H3Zm5 16h8m-4-4v4', 'file-doc': 'M6 2h9l5 5v15H6Zm9 0v5h5M9 12h8M9 16h8M9 8h3',
+  reveal: 'M3 12s4-7 9-7 9 7 9 7-4 7-9 7-9-7-9-7Zm9-3a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z', rename: 'M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z', copy: 'M9 9h12v12H9ZM15 9V3H3v12h6',
   panel: 'M3 3h18v18H3Zm6 0v18', forward: 'm7 14 5-5 5 5M5 4h14', transition: 'M3 7h9v10H3Zm11 5h7m-3-3 3 3-3 3', back: 'm7 10 5 5 5-5M5 20h14',
 };
 export function icon(name) {

@@ -1,5 +1,6 @@
 mod app_view;
 mod cli;
+mod cli_library;
 mod composer;
 mod connectors_cli;
 mod diagrams;

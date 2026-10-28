@@ -58,8 +58,10 @@ await shot(page, 'p4-deck-design-add-template');
 await page.locator('#export').click();
 await page.locator('#export-template[aria-checked="true"]').waitFor();
 await shot(page, 'p4-deck-export-into-template');
-await page.locator('#export-plain').click();
+// Unchecking the toggle makes the next export a plain file.
+await page.locator('#export-template').click();
+await page.locator('#export-menu [data-format="pptx"]').click();
 await page.waitForTimeout(50);
-assert((await page.evaluate(() => window.__templateCommands)).some(c => c.command === 'Export' && c.template === 'none'));
+assert((await page.evaluate(() => window.__templateCommands)).some(c => /^Export/.test(c.command) && c.template === 'none'));
 await page.close();
 await finish();

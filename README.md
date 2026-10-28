@@ -535,13 +535,25 @@ The model uses `canvas` to draft Markdown documents (`docs/*.doc.json`) and
 presentations (`decks/*.deck.json`). Both copy the space's default design;
 slides can use named layouts. Documents support block edits, anchored comments,
 suggestions, history and export to DOCX, PDF, Markdown and HTML. `/studio` opens
-the current doc or deck in the studio window (`/studio docs/q3.doc.json` names
-one, and `nexus-studio docs/q3.doc.json` opens it standalone). A doc opens as a
+the doc or deck studio showed last in the studio window (`/studio docs/q3.doc.json`
+names one, and `nexus-studio docs/q3.doc.json` opens it standalone); with no file
+yet it opens the library. A doc opens as a
 calm writing page: an outline on the left, comments in the margin, formatting
 over selected text, `/` for blocks, tracked-change suggestions from the model,
 a page preview and an export menu. Older `deck` tool calls remain supported as
 an alias. See [the canvas design](docs/docs-canvas.md) and
 [studio](docs/studio.md).
+
+Find your decks and docs in the **Library**: studio opens on it when it starts
+with no file (and from the **Library** button or Cmd/Ctrl+O), as a grid of cards
+with thumbnails, filters and search, and a menu to open, reveal, duplicate, rename,
+export or delete (a delete moves the file to `.trash/` in the space files). In the
+terminal, `/library` lists the same files (Enter opens one in studio, `e` exports
+it, `d` deletes it after a confirm) and `nexus library [--kind deck|doc] [--json]`
+prints them. Open…, Export…, Save a copy… and Add template… use the system's own
+file dialogs, so you choose where files go: Export starts in the folder you last
+exported to, and "Save to exports/ without asking" keeps the old one-click export
+into `exports/`.
 
 Add a company template with **Design → Add template…** in studio, or drop a
 `.pptx`, `.potx`, `.docx` or `.dotx` onto the window, then choose **Use for this
@@ -573,7 +585,8 @@ Type `/` in the composer for autocomplete. Aliases in parentheses.
 | `/files` (`images`, `scripts`, …) | browse space files / images / scripts |
 | `/apps` (`webapps`) | view web apps and pinned interactive panels |
 | `/pin-panel [name]` (`pin`) | keep the focused panel as a reusable mini-app |
-| `/studio [file]` (`deck`, `slides`) | open the current doc or deck (or the named one) in the studio window linked to this conversation (see `docs/studio.md`) |
+| `/studio [file]` (`deck`, `slides`) | open the last doc or deck (or the named one) in the studio window linked to this conversation; with none yet, open the library (see `docs/studio.md`) |
+| `/library` (`decks`, `lib`) | list the space's decks and docs: Enter opens in studio, `e` exports through the Save dialog, `d` deletes (to `.trash/`) |
 | `/skills` | manage skills (app + project/user/global Agent Skills) |
 | `/usage` (`analytics`, `costs`) | token/cache/cost analytics by backend & model (←/→ for 24h/7d/30d/all windows) |
 | `/compact` (`summarize`) | summarize old messages into a digest |

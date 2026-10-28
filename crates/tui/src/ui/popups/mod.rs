@@ -10,6 +10,7 @@ pub mod help;
 pub mod image_viewer;
 pub mod jobs;
 pub mod key;
+pub mod library;
 pub mod local;
 pub mod login;
 pub mod model;
@@ -23,6 +24,8 @@ pub mod swarm;
 pub mod usage;
 pub mod watches;
 
+#[cfg(test)]
+mod library_tests;
 #[cfg(test)]
 mod tests;
 

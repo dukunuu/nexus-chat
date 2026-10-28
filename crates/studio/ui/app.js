@@ -9,6 +9,7 @@ import { textNode, id, allNodes, slideSize, nodeLabel, parentOf } from './helper
 import { applyLocal, signature, slideAssets } from './local.js';
 import { playbackController } from './playback.js';
 import { animatePanelController } from './animate-panel.js';
+import { libraryController } from './library.js';
 
 hydrateIcons();
 const $ = selector => document.querySelector(selector);
@@ -27,6 +28,8 @@ function focusChanged() {
   focusTimer = setTimeout(() => command({ command:'Focus', slide:state.slideId, blocks:[...state.selected] }), 300);
 }
 function toast(text, view, actions = []) {
+  // The library covers the window; its notices go above it.
+  if (library.visible) { library.toast(text, [...(view ? [['View', view]] : []), ...actions]); return; }
   const node = $('#status'); node.textContent = text; node.hidden = !text;
   if (view) { const action = document.createElement('button'); action.textContent = 'View'; action.onclick = () => { node.hidden = true; view(); }; node.append(document.createTextNode(' · '), action); }
   for (const [label, run] of actions) { const action = document.createElement('button'); action.textContent = label; action.onclick = run; node.append(document.createTextNode(' · '), action); }
@@ -39,6 +42,8 @@ function pump() {
   catch (error) { rollback(); toast(error.message); pending = null; pump(); }
 }
 function command(build, complete) { queue.push({ build:typeof build === 'function' ? build : () => build, complete, barrier:typeof build === 'function' || !['Focus','ListFonts','Load'].includes(build.command) }); pump(); }
+// The library sends through whichever mode is live (doc mode has its own queue).
+const library = libraryController({ command:(cmd, complete) => (docUi ? docUi.api.command(cmd, complete) : command(cmd, complete)), toast });
 let gesture, authoritative;
 function rollback() {
   gesture = null; state.scrubbing = false;
@@ -162,11 +167,14 @@ function handleEvent(event, reply) {
     if (state.openNewest) { state.openThread = state.threads.at(-1)?.id; state.openNewest = false; }
     if (event.notice) toast(event.notice);
     state.template = !!event.template;
-    $('#export-template').disabled = !state.template;
+    // Only a deck that follows a template has a choice to make; checked, the
+    // formats above export into the template's package, unchecked a plain file.
+    $('#export-template').hidden = !state.template;
     $('#export-template').setAttribute('aria-checked', String(state.template && !plainFile));
     if (event.import_warnings?.length) showApproximations('Import approximations', 'Imported from PowerPoint', event.import_warnings);
     deckActivities = event.activities;
     renderDeck();
+    library.onDocument(event);
     for (const node of document.querySelectorAll('#canvas .block')) node.classList.toggle('external-flash', state.flash.includes(node.dataset.id));
     if (state.flash.length) { clearTimeout(flashTimer); flashTimer = setTimeout(() => { state.flash = []; document.querySelectorAll('.external-flash').forEach(n => n.classList.remove('external-flash')); }, 1800); }
   } else if (event.event === 'Designs') {
@@ -182,11 +190,17 @@ function handleEvent(event, reply) {
     command({ command: 'Designs' });
   } else if (event.event === 'Theme') {
     applyTheme(event.colors);
+  } else if (event.event === 'Library' || event.event === 'Idle') {
+    library.onEvent(event);
   } else if (event.event === 'Focus') {
     if (state.deck.slides.some(s => s.id === event.slide)) { state.slideId = event.slide; state.selected.clear(); render(); }
   } else {
     feedback.event(event);
-    if (event.event === 'Error') { rollback(); toast(event.message); }
+    if (event.event === 'Error') { rollback(); library.onEvent(event); toast(event.message); }
+    if (event.event === 'Saved') {
+      const name = event.path.split(/[\\/]/).pop();
+      toast(`Saved a copy: ${name}${event.assets ? ` with ${event.assets} asset${event.assets === 1 ? '' : 's'}` : ''}`, null, [['Reveal', () => command({ command:'Reveal', path:event.path })]]);
+    }
     if (event.event === 'Exported') {
       const warnings = event.warnings || [], actions = [['Reveal', () => command({ command:'Reveal', path:event.path })]];
       if (warnings.length) actions.push([`${warnings.length} approximations · Details`, () => showDetails('Export approximations', warnings)]);
@@ -198,7 +212,7 @@ function handleEvent(event, reply) {
 // Doc mode lives in ./doc/doc.js, loaded when the backend opens a doc. Its
 // events go there; a deck event brings the deck UI back.
 const DOC_EVENTS = new Set(['Doc', 'DocFeedback', 'DocPreview', 'DocFocus', 'Pages']);
-const SHARED_EVENTS = new Set(['Asset', 'Exported', 'Revealed', 'Error', 'Theme', 'Designs', 'TemplateImported']);
+const SHARED_EVENTS = new Set(['Asset', 'Exported', 'Saved', 'Revealed', 'Error', 'Theme', 'Designs', 'TemplateImported', 'Library', 'Idle']);
 let docUi = null, docQueue = Promise.resolve();
 function route(event, reply) {
   if (docUi && event.event === 'Deck') {
@@ -210,7 +224,7 @@ function route(event, reply) {
     docQueue = docQueue.then(async () => {
       if (!docUi) {
         const module = await import('./doc/doc.js');
-        docUi = module.mount({ applyTheme, ask });
+        docUi = module.mount({ applyTheme, ask, library });
         document.body.classList.add('doc-mode');
       }
       docUi.handle(event, reply);
@@ -292,7 +306,10 @@ function ask(heading, label, hint, value, action) {
 }
 pathDialog.addEventListener('close', () => { if (pathDialog.returnValue === 'ok') pathAction($('#path-input').value); });
 $('#rename-deck').onclick = () => { deckMenu(false); ask('Rename deck', 'Title', 'Give this project a name.', state.deck.title, value => { const title = value.trim(); if (title) command(() => ({ command:'Save', deck:{ ...state.deck, title } })); }); };
-$('#open-deck').onclick = () => { deckMenu(false); ask('Open', 'Deck path', 'Enter a local .deck.json, .doc.json or PowerPoint .pptx path.', '', path => command({ command:'Open', path })); };
+$('#open-deck').onclick = () => { deckMenu(false); command({ command:'OpenDialog' }); };
+$('#new-doc').onclick = () => { deckMenu(false); ask('New doc', 'Title', 'Created in your active space’s files/docs folder.', 'Untitled', title => command({ command:'NewDoc', title })); };
+$('#save-copy').onclick = () => { deckMenu(false); command({ command:'SaveCopy' }); };
+$('#open-library').onclick = () => library.show();
 $('#new-deck').onclick = () => { deckMenu(false); ask('New deck', 'Title', 'Created in your active space’s files/decks folder.', 'Untitled', title => command({ command:'NewDeck', title })); };
 function insert(block) {
   const slide = api.slide(); if (!slide) { toast('Add a slide first.'); return; }
@@ -303,7 +320,10 @@ $('#add-text').onclick = () => insert(textNode('Double-click to edit', { positio
 $('#add-shape').onclick = () => insert({ id:id('b'), kind:'shape', shape:'rect', fill:'accent', position:{ x:480, y:300 }, sizing:{ w:600, h:420 } });
 $('#add-image').onclick = () => ask('Import image', 'Image path', 'PNG, JPEG or WebP. A sanitized copy stays with the deck.', '', path => command({ command:'ImportAsset', path }, event => { if (event.event === 'Asset') insert({ id:id('b'), kind:'image', src:event.src, fit:'contain', position:{ x:240, y:180 }, sizing:{ w:1200, h:720 } }); }));
 $('#speaker-notes').onchange = event => { const slide = api.slide(), notes = event.target.value; if (slide) apply(() => [{ op:'set_notes', slide:slide.id, notes }]); };
-let exportFormat = 'pptx', plainFile = false;
+let plainFile = false;
+// "Save to exports/ without asking": the quick export, remembered on this device.
+const quickExport = () => { try { return localStorage.getItem('nexus-quick-export') === '1'; } catch { return false; } };
+const exportCommand = format => ({ command:quickExport() ? 'Export' : 'ExportAs', format, ...(plainFile ? { template:'none' } : {}) });
 $('#deck-design').onclick = () => {
   const pop = $('#deck-design-pop'); pop.hidden = !pop.hidden;
   $('#deck-design').setAttribute('aria-expanded', String(!pop.hidden));
@@ -313,23 +333,21 @@ $('#deck-design').onclick = () => {
     command({ command: 'Designs' });
   }
 };
-$('#add-template').onclick = () => chooseTemplate(command, toast);
+$('#add-template').onclick = () => chooseTemplate(command);
 templateDrop(command, toast, undefined, () => !docUi);
 document.addEventListener('pointerdown', event => { if (!event.target.closest('.template-menu')) { $('#deck-design-pop').hidden = true; $('#deck-design').setAttribute('aria-expanded', 'false'); } });
 $('#export-template').onclick = () => { plainFile = !plainFile; $('#export-template').setAttribute('aria-checked', String(state.template && !plainFile)); };
-$('#export-plain').onclick = () => { exportMenu(false); command({ command: 'Export', format: 'pptx', template: 'none' }); };
+$('#export-quick').onclick = () => { try { localStorage.setItem('nexus-quick-export', quickExport() ? '0' : '1'); } catch { /* storage may be unavailable */ } syncQuick(); };
+function syncQuick() { $('#export-quick').setAttribute('aria-checked', String(quickExport())); }
+syncQuick();
 function exportMenu(open, focus = false) {
   $('#export-menu').hidden = !open; $('#export').setAttribute('aria-expanded', String(open));
   if (open && focus) $('#export-menu button').focus();
 }
 $('#export').onclick = () => exportMenu($('#export-menu').hidden, true);
 for (const item of document.querySelectorAll('#export-menu [data-format]')) item.onclick = () => {
-  exportFormat = item.dataset.format; exportMenu(false); $('#export').focus();
-  command({ command:'Export', format:exportFormat, ...(plainFile ? { template: 'none' } : {}) });
-};
-$('#export-to').onclick = () => {
-  exportMenu(false);
-  ask('Export to…', 'Destination path', `Enter an absolute path for ${exportFormat.toUpperCase()}. Existing names receive a numbered suffix.`, '', path => command({ command:'Export', format:exportFormat, path, ...(plainFile ? { template: 'none' } : {}) }));
+  exportMenu(false); $('#export').focus();
+  command(exportCommand(item.dataset.format));
 };
 document.addEventListener('pointerdown', event => { if (!event.target.closest('.export-menu')) exportMenu(false); });
 document.addEventListener('keydown', event => {

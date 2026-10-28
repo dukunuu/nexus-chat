@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail, ensure};
+use nexus_core::canvas::dialogs::Dialogs;
 use nexus_core::deck::{self, Deck, Kind, Node, Op, same_file};
 use nexus_core::remote_image::Fetcher;
 use nexus_core::theme_colors::{self, ThemeColors};
@@ -20,6 +21,8 @@ mod doc_comments;
 mod exports;
 mod feedback;
 mod fonts;
+mod library;
+pub use library::Answer;
 mod templates;
 use nexus_core::deck::link::{ActivityState, Message as LinkMessage};
 use std::time::SystemTime;
@@ -147,6 +150,41 @@ pub enum Command {
         block: Option<String>,
         selection: Option<String>,
     },
+    /// The decks and docs of the space, newest first.
+    Library {},
+    /// Open a library file by its path inside the space files.
+    LibraryOpen {
+        path: String,
+    },
+    LibraryReveal {
+        path: String,
+    },
+    LibraryRename {
+        path: String,
+        title: String,
+    },
+    LibraryDuplicate {
+        path: String,
+    },
+    LibraryDelete {
+        path: String,
+    },
+    /// Export a library file through a native Save dialog.
+    LibraryExport {
+        path: String,
+        format: String,
+    },
+    /// A native Open dialog: nexus files open, Office and Markdown files import.
+    OpenDialog {},
+    /// A native Save dialog for the open file in one of its export formats.
+    ExportAs {
+        format: String,
+        template: Option<String>,
+    },
+    /// A native Save dialog for a copy of the open deck or doc with its assets.
+    SaveCopy {},
+    /// A native Open dialog for a `PowerPoint` or Word template.
+    PickTemplate {},
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -176,6 +214,8 @@ pub enum Event {
         /// Approximations made when a `PowerPoint` file was just imported.
         import_warnings: Vec<String>,
         template: bool,
+        /// Studio opened with no file: the page shows the library.
+        home: bool,
     },
     Feedback {
         threads: Vec<nexus_core::deck::feedback::Thread>,
@@ -202,6 +242,7 @@ pub enum Event {
         design: doc::DesignState,
         can_undo: bool,
         can_redo: bool,
+        home: bool,
     },
     DocFeedback {
         threads: Vec<nexus_core::doc::feedback::Thread>,
@@ -247,6 +288,24 @@ pub enum Event {
         path: PathBuf,
         warnings: Vec<String>,
     },
+    /// A copy of the open file, with the assets it uses, was written.
+    Saved {
+        path: PathBuf,
+        assets: usize,
+    },
+    /// Every deck and doc of the space.
+    Library {
+        items: Vec<library::Item>,
+        /// The library path of the open file, when it is inside the space.
+        current: Option<String>,
+        /// Studio opened with no file.
+        home: bool,
+        /// The file an operation just made, to highlight.
+        selected: Option<String>,
+        notice: Option<String>,
+    },
+    /// A dialog was cancelled or the command changed nothing on screen.
+    Idle {},
     Revealed {},
     Error {
         message: String,
@@ -297,19 +356,42 @@ pub struct Backend {
     /// Content hashes of deck assets by file, reused while the file's stamp
     /// is unchanged, so an edit doesn't re-read every image and font.
     asset_hashes: std::cell::RefCell<std::collections::HashMap<PathBuf, (Stamp, String)>>,
+    /// Native Open and Save dialogs; tests script them.
+    dialogs: Arc<dyn Dialogs>,
+    /// Where the data root's small settings live (`studio-settings.json`).
+    data_dir: PathBuf,
+    /// Studio started with no file, and nothing has been opened or written since.
+    home: std::cell::Cell<bool>,
+    /// The last library listing, which thumbnail requests are answered from.
+    listing: std::cell::RefCell<Vec<nexus_core::canvas::Entry>>,
+    /// Approximations from importing a Word or Markdown file, reported once.
+    doc_notice: std::cell::RefCell<Option<String>>,
 }
 
 /// Modified time and length: enough to notice another writer within one mtime tick.
 type Stamp = (SystemTime, u64);
 
 impl Backend {
+    #[cfg(test)]
     pub fn start(path: Option<&Path>, files_dir: &Path, data_dir: &Path) -> Result<Self> {
+        Self::open(path, files_dir, data_dir, false)
+    }
+
+    /// What the window does: with no file given the library shows, and a blank
+    /// deck stays in memory until it is first edited, so starting studio never
+    /// leaves an empty file in the library.
+    pub fn launch(path: Option<&Path>, files_dir: &Path, data_dir: &Path) -> Result<Self> {
+        Self::open(path, files_dir, data_dir, true)
+    }
+
+    fn open(path: Option<&Path>, files_dir: &Path, data_dir: &Path, defer: bool) -> Result<Self> {
         let recent = data_dir.join("studio-recent.json");
         let remembered = fs::read(&recent)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<PathBuf>(&bytes).ok())
             .filter(|p| p.is_absolute() && p.is_file());
         let mut import_warnings = Vec::new();
+        let no_path_given = path.is_none();
         let chosen = path.or(remembered.as_deref());
         let opens_doc = chosen.is_some_and(doc::is_doc_path);
         let path = match chosen {
@@ -350,6 +432,11 @@ impl Backend {
             import_warnings,
             exports: Vec::new(),
             asset_hashes: std::cell::RefCell::default(),
+            dialogs: default_dialogs(),
+            data_dir: data_dir.into(),
+            home: std::cell::Cell::new(no_path_given),
+            listing: std::cell::RefCell::default(),
+            doc_notice: std::cell::RefCell::default(),
         };
         if opens_doc {
             let doc = if backend.path.exists() {
@@ -361,11 +448,14 @@ impl Backend {
             backend.enter_doc(path, doc)?;
             return Ok(backend);
         }
-        if !backend.path.exists() {
+        let in_memory = defer && chosen.is_none();
+        if !backend.path.exists() && !in_memory {
             backend.save()?;
         }
         backend.known_revision = backend.deck.revision();
-        backend.remember()?;
+        if !in_memory {
+            backend.remember()?;
+        }
         backend.load_feedback()?;
         backend.deck_stamp = stamp(&backend.path);
         Ok(backend)
@@ -388,6 +478,7 @@ impl Backend {
                 .as_deref()
                 .and_then(|slug| nexus_core::design::load(&self.files_dir, slug).ok())
                 .is_some_and(|d| d.source.is_some()),
+            home: self.home.get(),
             deck: self.deck.clone(),
             colors: self.colors.clone(),
             revision: self.deck.revision(),
@@ -520,6 +611,9 @@ impl Backend {
 
     #[allow(clippy::too_many_lines)]
     fn execute(&mut self, command: Command) -> Result<Event> {
+        if let Some(event) = self.library_command(&command)? {
+            return Ok(event);
+        }
         if let Some(event) = self.switch_document(&command)? {
             return Ok(event);
         }
@@ -796,6 +890,7 @@ impl Backend {
     /// deck's history (`deck/history.rs`), so the model's `history` action and
     /// the user can both go back.
     fn write_deck(&self, deck: &Deck) -> Result<()> {
+        self.home.set(false);
         // History is a safety net: failing to keep a version must not block a save.
         let _ = deck::history::record_before_write(
             &self.path,
@@ -837,6 +932,7 @@ impl Backend {
     }
 
     fn open_document(&mut self, path: PathBuf, deck: Deck) -> Result<()> {
+        self.home.set(false);
         let root = asset_root(&path)?;
         atomic_write(&self.recent, &serde_json::to_vec(&path)?)?;
         self.path = path;
@@ -887,6 +983,9 @@ impl Backend {
         }
         if let Some(page) = path.strip_prefix("/pages/") {
             return self.serve_page(page);
+        }
+        if let Some(thumbnail) = path.strip_prefix("/library/") {
+            return self.serve_thumbnail(thumbnail);
         }
         let relative = path.strip_prefix("/assets/").context("unknown resource")?;
         ensure!(deck::safe_asset_path(relative), "unsafe asset path");
@@ -940,6 +1039,19 @@ impl Backend {
         // Reject an assets symlink changed since the document was opened.
         asset_root(&self.path)?;
         Ok((Arc::clone(&self.fetcher), src))
+    }
+}
+
+/// The operating system's dialogs, except in tests, which script their own: a
+/// test must never open a window.
+fn default_dialogs() -> Arc<dyn Dialogs> {
+    #[cfg(test)]
+    {
+        Arc::new(nexus_core::canvas::dialogs::Scripted::new([]))
+    }
+    #[cfg(not(test))]
+    {
+        Arc::new(nexus_core::canvas::dialogs::Native)
     }
 }
 
@@ -1181,6 +1293,8 @@ fn embedded(path: &str) -> Option<(&'static str, &'static str)> {
         "/fields.js" => ("text/javascript", include_str!("../ui/fields.js")),
         "/fonts.js" => ("text/javascript", include_str!("../ui/fonts.js")),
         "/templates.js" => ("text/javascript", include_str!("../ui/templates.js")),
+        "/library.js" => ("text/javascript", include_str!("../ui/library.js")),
+        "/library.css" => ("text/css; charset=utf-8", include_str!("../ui/library.css")),
         "/guides.js" => ("text/javascript", include_str!("../ui/guides.js")),
         "/animations.js" => ("text/javascript", include_str!("../ui/animations.js")),
         "/playback.js" => ("text/javascript", include_str!("../ui/playback.js")),
@@ -1208,6 +1322,8 @@ mod animation_tests;
 mod doc_tests;
 #[cfg(test)]
 mod font_tests;
+#[cfg(test)]
+mod library_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

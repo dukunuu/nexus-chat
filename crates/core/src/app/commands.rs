@@ -152,6 +152,11 @@ pub const COMMANDS: &[Command] = &[
         aliases: &["deck", "slides"],
     },
     Command {
+        name: "library",
+        desc: "your decks and docs: open in studio, export, delete",
+        aliases: &["decks", "lib"],
+    },
+    Command {
         name: "pin-panel",
         desc: "pin the focused panel as a mini-app: [name] | unpin <name> | rename <name> <new>",
         aliases: &["pin", "unpin", "unpin-panel", "rename-panel"],
@@ -412,6 +417,8 @@ pub enum AppCommand {
     RenamePanel { from: String, to: String },
     /// `/studio [deck]` — open or focus the linked slide canvas (view-owned).
     OpenStudio { deck: Option<String> },
+    /// `/library` — the decks and docs of this space (view-owned).
+    OpenLibrary,
     /// `/view <path|url>` — show an image in the in-terminal viewer (or the
     /// system viewer, per the `image_viewer` setting). View-owned.
     OpenImage { target: String },
@@ -561,6 +568,7 @@ impl App {
             "studio" => Ok(AppCommand::OpenStudio {
                 deck: Some(rest(cmd, token)).filter(|deck| !deck.is_empty()),
             }),
+            "library" => Ok(AppCommand::OpenLibrary),
             "connectors" => parse_connectors(&rest(cmd, token)),
             "pin-panel" => parse_pin_panel(token, &rest(cmd, token)),
             "research" => Ok(AppCommand::RunResearch {
@@ -646,6 +654,7 @@ impl App {
             | AppCommand::OpenConnectors
             | AppCommand::PinPanel { .. }
             | AppCommand::OpenStudio { .. }
+            | AppCommand::OpenLibrary
             | AppCommand::OpenImage { .. }
             | AppCommand::OpenUsage
             | AppCommand::OpenJobForm

@@ -320,6 +320,8 @@ pub enum Popup {
     Swarm,
     /// `/connectors`: MCP connectors, their status, tools and policies.
     Connectors,
+    /// `/library`: the space's decks and docs, to open in studio, export or delete.
+    Library,
     /// `/usage`: aggregated per-backend/per-model token, cache, and cost stats.
     Usage,
     /// `/harness`: ranked tool failure modes and their latest transcripts.

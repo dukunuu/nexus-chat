@@ -1,4 +1,4 @@
-// The same chooser-byte IPC as font import; no local paths reach the page.
+// A dropped file travels as chooser bytes, the same IPC as font import; no local paths reach the page.
 export async function importTemplateFile(file, command, toast) {
   if (file.size > 250 * 1024 * 1024) { toast('Template exceeds the 250 MB size limit.'); return; }
   try {
@@ -8,13 +8,9 @@ export async function importTemplateFile(file, command, toast) {
     command({ command: 'ImportTemplateData', name: file.name, data: parts.join('') });
   } catch (error) { toast(error.message); }
 }
-export function chooseTemplate(command, toast) {
-  const input = document.createElement('input');
-  input.type = 'file'; input.accept = '.pptx,.potx,.docx,.dotx'; input.hidden = true;
-  document.body.append(input);
-  input.oncancel = () => input.remove();
-  input.onchange = () => { const file = input.files[0]; input.remove(); if (file) importTemplateFile(file, command, toast); };
-  input.click();
+// The operating system's own Open dialog: the page never sees the path or the bytes.
+export function chooseTemplate(command) {
+  command({ command: 'PickTemplate' });
 }
 export function templateDrop(command, toast, signal, active = () => true) {
   document.addEventListener('dragover', event => {

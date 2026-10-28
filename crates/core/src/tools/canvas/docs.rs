@@ -373,10 +373,9 @@ impl ToolBox {
     }
 
     fn doc_export(&self, relative: &str, path: &Path, doc: &Doc, v: &Value) -> Result<String> {
-        let format = v["format"]
-            .as_str()
-            .or_else(|| v["text"].as_str())
-            .context("format is required: docx, pdf, md or html")?;
+        let (format, destination) = self
+            .export_request(v)
+            .map_err(|e| anyhow::anyhow!("{e}; format is docx, pdf, md or html"))?;
         let format: doc::export::Format = format.parse()?;
         if format != doc::export::Format::Md {
             let assets = path.parent().context("doc folder")?.join("assets");
@@ -388,18 +387,29 @@ impl ToolBox {
                 format,
                 v["template"].as_str(),
             )?;
-            let written = crate::deck::export::write_export(&output, &self.space_files_dir, None)?;
+            let written = crate::deck::export::write_export(
+                &output,
+                &self.space_files_dir,
+                destination.as_deref(),
+            )?;
             let root = self.space_files_dir.canonicalize()?;
             let mut out = format!(
                 "exported {relative} → {}\n",
-                written.strip_prefix(root)?.display()
+                written.strip_prefix(root).unwrap_or(&written).display()
             );
             for warning in output.warnings {
                 let _ = writeln!(out, "warning: {warning}");
             }
             return Ok(out);
         }
-        let assets_dir = crate::design::storage::confined(&self.space_files_dir, "exports/assets")?;
+        // Markdown names its images in an `assets/` folder beside the file.
+        let assets_dir = match destination.as_deref().and_then(Path::parent) {
+            Some(folder) => {
+                ensure!(folder.is_dir(), "the destination folder does not exist");
+                folder.join("assets")
+            }
+            None => crate::design::storage::confined(&self.space_files_dir, "exports/assets")?,
+        };
         let mut exported = doc.clone();
         for block in &mut exported.blocks {
             if let BlockKind::Image { src, .. } = &mut block.kind {
@@ -427,11 +437,15 @@ impl ToolBox {
             file_name: format!("{}.md", slug(&doc.title)),
             warnings: Vec::new(),
         };
-        let written = crate::deck::export::write_export(&output, &self.space_files_dir, None)?;
+        let written = crate::deck::export::write_export(
+            &output,
+            &self.space_files_dir,
+            destination.as_deref(),
+        )?;
         let root = self.space_files_dir.canonicalize()?;
         Ok(format!(
             "exported {relative} → {}\n",
-            written.strip_prefix(root)?.display()
+            written.strip_prefix(root).unwrap_or(&written).display()
         ))
     }
 }

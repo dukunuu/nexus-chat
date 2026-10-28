@@ -25,6 +25,8 @@ const HOME: &str = "nexus://localhost/index.html";
 
 enum Message {
     Command(String),
+    /// A native dialog was answered (on its helper thread): finish the command.
+    Dialog(backend::Answer),
     Link(LinkMessage),
     /// A line from nexus that speaks another link version: the window says so.
     LinkError(String),
@@ -46,7 +48,7 @@ fn main() -> Result<()> {
         .into_iter()
         .find(|s| s.id == default_id)
         .context("missing active space")?;
-    let backend = Arc::new(Mutex::new(Backend::start(
+    let backend = Arc::new(Mutex::new(Backend::launch(
         path.as_deref(),
         &space.files_dir(&active.name),
         &space.root,
@@ -67,6 +69,7 @@ fn main() -> Result<()> {
         .with_min_inner_size(LogicalSize::new(900.0, 600.0))
         .build(&event_loop)?;
     let proxy = event_loop.create_proxy();
+    let dialog_proxy = proxy.clone();
     start_threads(&proxy, attached);
     let protocol_backend = Arc::clone(&backend);
     let handle = runtime.handle().clone();
@@ -106,7 +109,7 @@ fn main() -> Result<()> {
                 if matches!(message, Message::Link(LinkMessage::Open { .. })) {
                     window.set_focus();
                 }
-                let (title, script) = handle_message(message, &backend);
+                let (title, script) = handle_message(message, &backend, &dialog_proxy);
                 if !script.is_empty() {
                     window.set_title(&title);
                     if let Err(error) = webview.evaluate_script(&script) {
@@ -161,9 +164,14 @@ fn start_threads(proxy: &EventLoopProxy<Message>, attached: bool) {
 
 /// One `nexus://` request: embedded UI, deck assets, or a vetted remote image.
 async fn respond(backend: &Arc<Mutex<Backend>>, uri: &str) -> Response<Vec<u8>> {
-    let remote = backend.lock().expect("backend lock").remote_image(uri);
+    let (remote, thumbnail) = {
+        let backend = backend.lock().expect("backend lock");
+        (backend.remote_image(uri), backend.thumbnail_job(uri))
+    };
     let result = if let Ok((fetcher, src)) = remote {
         remote_bytes(backend, &fetcher, &src).await
+    } else if let Ok((files, entry)) = thumbnail {
+        thumbnail_bytes(files, entry).await
     } else {
         backend.lock().expect("backend lock").serve(uri)
     };
@@ -202,12 +210,34 @@ fn flush_link(backend: &mut Backend) -> Result<()> {
     Ok(())
 }
 
-fn handle_message(message: Message, backend: &Mutex<Backend>) -> (String, String) {
+fn handle_message(
+    message: Message,
+    backend: &Mutex<Backend>,
+    proxy: &EventLoopProxy<Message>,
+) -> (String, String) {
     let mut backend = backend.lock().expect("backend lock");
-    let asynchronous = !matches!(message, Message::Command(_));
+    // A dialog's answer finishes the command that asked, so it is that command's reply.
+    let asynchronous = !matches!(message, Message::Command(_) | Message::Dialog(_));
     let result = match message {
         Message::LinkError(message) => Ok(Some(backend::Event::Error { message })),
-        Message::Command(source) => Ok(Some(backend.dispatch(&source))),
+        Message::Command(source) => match backend.prepare_dialog(&source) {
+            // A native dialog is shown by a helper thread, never inside this
+            // handler: macOS runs the panel on the main thread (rfd hands it
+            // over), and the window's event handler and the backend stay free
+            // while it is open. The answer comes back as `Message::Dialog`.
+            Some(Ok(job)) => {
+                let proxy = proxy.clone();
+                std::thread::spawn(move || {
+                    let _ = proxy.send_event(Message::Dialog(job.ask()));
+                });
+                return (format!("nexus studio — {}", backend.title()), String::new());
+            }
+            Some(Err(error)) => Ok(Some(backend::Event::Error {
+                message: error.to_string(),
+            })),
+            None => Ok(Some(backend.dispatch(&source))),
+        },
+        Message::Dialog(answer) => Ok(Some(backend.finish_dialog(answer))),
         Message::Link(message) => backend.receive_link(message).map(Some),
         Message::Poll => backend.poll(),
     };
@@ -229,6 +259,23 @@ fn handle_message(message: Message, backend: &Mutex<Backend>) -> (String, String
         }
     });
     (format!("nexus studio — {}", backend.title()), script)
+}
+
+/// A library thumbnail, drawn off the backend's lock so a slow render never
+/// holds up a click, and one at a time so a full library does not start dozens.
+async fn thumbnail_bytes(
+    files: PathBuf,
+    entry: nexus_core::canvas::Entry,
+) -> Result<(&'static str, Vec<u8>)> {
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+    tokio::task::spawn_blocking(move || {
+        let _turn = ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let path = nexus_core::canvas::ensure_thumbnail(&files, &entry)?;
+        Ok(("image/png", std::fs::read(path)?))
+    })
+    .await?
 }
 
 async fn remote_bytes(

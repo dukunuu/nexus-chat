@@ -18,6 +18,10 @@ name = "nexus_core"
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.186"
 
+[features]
+# The OS file dialogs, for frontends with a user at a screen (studio, the TUI).
+native-dialogs = ["dep:rfd"]
+
 [dependencies]
 # ── Core deps ─────────────────────────────────────────────────────────────
 anyhow = { workspace = true }
@@ -39,6 +43,7 @@ rand = { workspace = true }
 resvg = { workspace = true }
 reqwest = { workspace = true }
 reqwest-eventsource = { workspace = true }
+rfd = { workspace = true, optional = true }  # native Open/Save dialogs (canvas/dialogs.rs); frontends enable `native-dialogs`
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

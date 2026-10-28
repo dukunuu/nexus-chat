@@ -32,6 +32,9 @@ mod design;
 #[path = "canvas/docs.rs"]
 mod docs;
 #[cfg(test)]
+#[path = "canvas/export_path_tests.rs"]
+mod export_path_tests;
+#[cfg(test)]
 #[path = "canvas/page_tests.rs"]
 mod page_tests;
 #[path = "canvas/read.rs"]
@@ -1491,17 +1494,54 @@ fn deck_comment(relative: &str, path: &Path, v: &Value, notes: &mut Vec<String>)
 }
 
 impl ToolBox {
-    /// Write the deck as a file under `<space files>/exports/`, never
-    /// overwriting, and list what had to be approximated.
+    /// The export's format word and, when the user named one in their latest
+    /// message, an absolute destination (CLI `--out`). A path rides in the
+    /// existing `format` argument and its extension picks the format, so the
+    /// tool definition gains nothing; a path the user did not write is refused.
+    pub(super) fn export_request(&self, v: &Value) -> Result<(String, Option<PathBuf>)> {
+        let raw = v["format"]
+            .as_str()
+            .or_else(|| v["text"].as_str())
+            .context("format is required")?
+            .trim();
+        let drive = raw.as_bytes().get(1) == Some(&b':');
+        if !raw.starts_with('/') && !drive {
+            return Ok((raw.to_ascii_lowercase(), None));
+        }
+        let destination = PathBuf::from(raw);
+        ensure!(
+            destination.is_absolute(),
+            "a destination must be an absolute path"
+        );
+        ensure!(
+            self.decision_context
+                .lock()
+                .expect("decision context")
+                .1
+                .contains(raw),
+            "export only writes outside the space where the user wrote the path; omit it to save in exports/ and tell the user"
+        );
+        let name = raw.to_ascii_lowercase();
+        let format = if name.ends_with(".deck.json") {
+            "json".to_string()
+        } else {
+            match destination.extension().and_then(|e| e.to_str()) {
+                Some("zip") => "png".to_string(),
+                Some(extension) => extension.to_ascii_lowercase(),
+                None => bail!("the destination needs an extension: .pptx, .pdf, .docx, .md …"),
+            }
+        };
+        Ok((format, Some(destination)))
+    }
+
+    /// Write the deck as a file under `<space files>/exports/` (or where the
+    /// user named), never overwriting, and list what had to be approximated.
     fn deck_export(&self, relative: &str, path: &Path, v: &Value) -> Result<String> {
         use crate::deck::export::{self, Format};
-        let format: Format = v["text"]
-            .as_str()
-            .or_else(|| v["format"].as_str())
-            .context("text is the format: pptx, pdf, png, html or json")?
-            .trim()
-            .to_ascii_lowercase()
-            .parse()?;
+        let (format, destination) = self.export_request(v).map_err(|e| {
+            anyhow::anyhow!("{e}; text is the format: pptx, pdf, png, html or json")
+        })?;
+        let format: Format = format.parse()?;
         let deck = load(path)?;
         let assets = path.parent().map(|dir| dir.join("assets"));
         let output = crate::design::template::export_deck(
@@ -1511,7 +1551,7 @@ impl ToolBox {
             format,
             v["template"].as_str(),
         )?;
-        let written = export::write_export(&output, &self.space_files_dir, None)?;
+        let written = export::write_export(&output, &self.space_files_dir, destination.as_deref())?;
         let shown = written
             .strip_prefix(self.space_files_dir.canonicalize().unwrap_or_default())
             .unwrap_or(&written)

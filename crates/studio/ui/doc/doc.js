@@ -60,10 +60,12 @@ export function mount(shared) {
     return b;
   }
   const undoButton = barButton('undo', 'Undo', true), redoButton = barButton('redo', 'Redo', true);
+  const libraryButton = barButton('library', 'Library');
+  libraryButton.title = 'Library (⌘/Ctrl+O)';
   const designButton = barButton('design', 'Design'), previewButton = barButton('pages', 'Pages'), exportButton = barButton('export', 'Export', false, true);
   designButton.setAttribute('aria-haspopup', 'dialog'); exportButton.setAttribute('aria-haspopup', 'menu');
   previewButton.setAttribute('aria-pressed', 'false');
-  top.append(outlineToggle, brand, titleInput, saveState, el('span', 'spacer'), undoButton, redoButton, pill, designButton, previewButton, exportButton);
+  top.append(outlineToggle, brand, libraryButton, el('span', 'bar-divider'), titleInput, saveState, el('span', 'spacer'), undoButton, redoButton, pill, designButton, previewButton, exportButton);
 
   const body = el('div', 'doc-body');
   const outline = el('nav', 'doc-outline');
@@ -114,6 +116,8 @@ export function mount(shared) {
   function renderSave() { saveState.textContent = pending?.ops || editor.hasDirty() || queue.some(q => q.ops) ? 'Saving' : 'Saved'; }
 
   function toast(text, actions = []) {
+    // The library covers the window; its notices go above it.
+    if (shared.library?.visible) { shared.library.toast(text, actions); return; }
     toastNode.replaceChildren(document.createTextNode(text));
     for (const [label, run] of actions) {
       const b = el('button', 'quiet', label);
@@ -183,6 +187,12 @@ export function mount(shared) {
         command({ command: 'DocDesigns' });
         break;
       case 'Pages': showPages(event); break;
+      case 'Library': case 'Idle': shared.library.onEvent(event); break;
+      case 'Saved': {
+        const name = event.path.split(/[\\/]/).pop();
+        toast(`Saved a copy: ${name}${event.assets ? ` with ${event.assets} asset${event.assets === 1 ? '' : 's'}` : ''}`, [['Reveal', () => command({ command: 'Reveal', path: event.path })]]);
+        break;
+      }
       case 'Theme': shared.applyTheme(event.colors); break;
       case 'Exported': {
         const actions = [['Reveal', () => command({ command: 'Reveal', path: event.path })]];
@@ -191,6 +201,7 @@ export function mount(shared) {
         break;
       }
       case 'Error':
+        shared.library.onEvent(event);
         toast(event.message);
         if (reply && finished?.cmd?.command === 'DocApply') { queue.length = 0; command({ command: 'Load' }); }
         break;
@@ -233,7 +244,8 @@ export function mount(shared) {
       if (at) { surface.focus({ preventScroll: true }); editor.place(at); }
     }
     if (state.preview && event.revision !== state.pagesRevision) requestPages();
-    if (first) surface.focus({ preventScroll: true });
+    shared.library.onDocument(event);
+    if (first && !shared.library.visible) surface.focus({ preventScroll: true });
   }
 
   function flash(ids) {
@@ -408,7 +420,7 @@ export function mount(shared) {
     if (!designs.available) list.append(el('div', 'menu-empty', 'Loading…'));
     designPop.append(list);
     const add = el('button', 'menu-row compact', 'Add template…');
-    add.type = 'button'; add.addEventListener('click', () => chooseTemplate(command, toast));
+    add.type = 'button'; add.addEventListener('click', () => { togglePop(designPop, designButton, false); chooseTemplate(command); });
     designPop.append(add);
     place(designPop, designButton);
   }
@@ -436,7 +448,7 @@ export function mount(shared) {
     const row = el('button', 'menu-row compact');
     row.type = 'button'; row.setAttribute('role', 'menuitem');
     row.append(el('span', 'menu-label', label), el('span', 'menu-hint', hint));
-    row.addEventListener('click', () => { togglePop(exportPop, exportButton, false); command({ command: 'DocExport', format, ...(plainFile ? { template: 'none' } : {}) }); });
+    row.addEventListener('click', () => { togglePop(exportPop, exportButton, false); command({ command: quickExport() ? 'DocExport' : 'ExportAs', format, ...(plainFile ? { template: 'none' } : {}) }); });
     exportPop.append(row);
   }
   // One toggle, shown only when the doc follows a template: checked, every
@@ -448,14 +460,33 @@ export function mount(shared) {
   let plainFile = false;
   function exportMode() {
     const has = Boolean(state.design?.template), on = has && !plainFile;
-    templateRule.hidden = template.hidden = !has;
+    template.hidden = !has;
+    syncQuick();
     template.replaceChildren(el('span', 'menu-label', 'Into template'), el('span', 'menu-hint', state.design?.name ?? ''));
     if (on) template.append(glyph('check'));
     template.classList.toggle('on', on);
     template.setAttribute('aria-checked', String(on));
   }
   template.addEventListener('click', () => { plainFile = !plainFile; exportMode(); });
-  exportPop.append(templateRule, template);
+  // "Save to exports/ without asking": the quick export, remembered on this device.
+  const quickExport = () => { try { return localStorage.getItem('nexus-quick-export') === '1'; } catch { return false; } };
+  const quick = el('button', 'menu-extra');
+  quick.type = 'button'; quick.setAttribute('role', 'menuitemcheckbox');
+  function syncQuick() {
+    const on = quickExport();
+    quick.replaceChildren(el('span', 'menu-label', 'Save to exports/ without asking'));
+    if (on) quick.append(glyph('check'));
+    quick.classList.toggle('on', on);
+    quick.setAttribute('aria-checked', String(on));
+  }
+  quick.addEventListener('click', () => { try { localStorage.setItem('nexus-quick-export', quickExport() ? '0' : '1'); } catch { /* storage may be unavailable */ } syncQuick(); });
+  syncQuick();
+  const copyRule = el('div', 'menu-rule');
+  const copy = el('button', 'menu-extra');
+  copy.type = 'button'; copy.setAttribute('role', 'menuitem');
+  copy.append(el('span', 'menu-label', 'Save a copy…'), el('span', 'menu-hint', '.doc.json'));
+  copy.addEventListener('click', () => { togglePop(exportPop, exportButton, false); command({ command: 'SaveCopy' }); });
+  exportPop.append(templateRule, template, quick, copyRule, copy);
   overlay.append(exportPop);
   exportButton.addEventListener('click', () => togglePop(exportPop, exportButton, undefined, () => { exportMode(); place(exportPop, exportButton); exportPop.querySelector('button')?.focus(); }));
   exportPop.addEventListener('keydown', e => {
@@ -471,6 +502,7 @@ export function mount(shared) {
   }, { signal: lifetime.signal });
 
   templateDrop(command, toast, lifetime.signal);
+  libraryButton.addEventListener('click', () => shared.library.show());
 
   // -- page preview -------------------------------------------------------------------------------------------
 

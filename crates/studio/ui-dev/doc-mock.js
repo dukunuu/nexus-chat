@@ -103,7 +103,7 @@
           if (m.command === 'DocDesigns') return emit({ event: 'Designs', available: [{ slug: 'nexus', name: 'Nexus', colors: doc.theme.colors, fonts: doc.theme.fonts, current: true }, { slug: 'warm', name: 'Warm paper', colors: { bg: '#fffaf0', fg: '#3b2f2f', accent: '#c0392b', muted: '#8c7b75' }, fonts: doc.theme.fonts, current: false }] });
           if (m.command === 'DocApplyDesign') { sequence++; return emit(current()); }
           if (m.command === 'DocPages') return emit({ event: 'Pages', revision: revision(), pages: [1, 2, 3].map(n => ({ n, width: 595.28, height: 841.89, src: `/pages/${revision()}-${n}.png` })) });
-          if (m.command === 'DocExport') return emit({ event: 'Exported', path: `/tmp/exports/q3-strategy.${m.format}`, warnings: [] });
+          if (m.command === 'DocExport' || m.command === 'ExportAs') return emit({ event: 'Exported', path: `/tmp/exports/q3-strategy.${m.format}`, warnings: [] });
           if (m.command === 'DocImportAsset') return emit({ event: 'Asset', src: 'assets/pasted.png' });
           if (m.command === 'Reveal') return emit({ event: 'Revealed' });
           return emit(current());

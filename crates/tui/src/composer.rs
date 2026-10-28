@@ -888,6 +888,7 @@ impl AppView {
                 }
             }
             AppCommand::OpenImage { target } => self.open_image_command(&target),
+            AppCommand::OpenLibrary => crate::ui::popups::library::open(self),
             AppCommand::OpenStudio { deck } => {
                 if let Err(error) = self.open_studio(deck.as_deref()) {
                     self.push_status(format!("{error:#}"));

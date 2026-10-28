@@ -321,9 +321,18 @@ pub enum Command {
         #[command(subcommand)]
         cmd: DesignCmd,
     },
-    /// Open the local slide editor in a separate desktop window.
+    /// List the decks and docs of the active space, newest first.
+    Library {
+        /// Only decks or only docs.
+        #[arg(long, value_parser = ["deck", "doc"])]
+        kind: Option<String>,
+        /// Emit JSON instead of the human-readable list.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open the local studio (decks and docs) in a separate desktop window.
     Studio {
-        /// Deck to open (otherwise the most recent deck).
+        /// File to open: a deck, doc, .pptx, .docx or .md (otherwise the Library).
         path: Option<PathBuf>,
     },
     /// Update to the latest release from crates.io — runs
@@ -691,6 +700,12 @@ pub async fn run(cmd: Command) -> Result<()> {
             let db = db::Db::open(&space.db_path())?;
             let files = space.files_dir(&resolve_space_name(&db, None)?);
             design_files(cmd, &files)
+        }
+        Command::Library { kind, json } => {
+            let space = space::Space::open()?;
+            let db = db::Db::open(&space.db_path())?;
+            let files = space.files_dir(&resolve_space_name(&db, None)?);
+            crate::cli_library::run(kind.as_deref(), json, &files)
         }
         Command::Studio { path } => launch_studio(path.as_deref()),
         Command::Update => update().await,
@@ -3821,7 +3836,7 @@ fn resolve_space_name(db: &db::Db, space_name: Option<&str>) -> Result<String> {
 /// Write a line to stdout; exit quietly when the reader closed the pipe
 /// (`nexus usage | head`) — coreutils behavior, not Rust's default panic
 /// on EPIPE.
-fn out(line: impl std::fmt::Display) {
+pub(crate) fn out(line: impl std::fmt::Display) {
     let mut stdout = std::io::stdout();
     if writeln!(stdout, "{line}").is_err() {
         std::process::exit(0);
