@@ -302,6 +302,8 @@ pub struct Context {
     pub changed: Vec<(PathBuf, String)>,
     /// Whether canvas already sent its deck field reference this session.
     pub schema_shown: bool,
+    /// Whether canvas already sent its deck art direction this session.
+    pub art_shown: bool,
     /// The independent, deferred doc field reference has been returned.
     pub doc_schema_shown: bool,
     /// Registered comment turns, keyed by chat task id; the bridge drains results.

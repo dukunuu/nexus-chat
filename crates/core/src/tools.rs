@@ -261,6 +261,10 @@ pub struct ToolBox {
     /// absent, and each deck gets one rooted at its own `assets/` folder.
     #[cfg(test)]
     pub(crate) deck_images: Option<Arc<crate::remote_image::Fetcher>>,
+    /// Test seam: where the `canvas` tool gets Google Fonts. Tests without one
+    /// never reach the network.
+    #[cfg(test)]
+    pub(crate) deck_fonts: Option<Arc<dyn crate::deck::google_fonts::Source>>,
     files: Option<FilesCtx>,
     apps: Option<AppsCtx>,
     /// Whether the current model supports image inputs. When false, tool
@@ -967,6 +971,8 @@ impl ToolBox {
             remote_images: None,
             #[cfg(test)]
             deck_images: None,
+            #[cfg(test)]
+            deck_fonts: None,
             files,
             apps,
             cache_only: false,
@@ -1048,6 +1054,8 @@ impl ToolBox {
             remote_images: self.remote_images.clone(),
             #[cfg(test)]
             deck_images: self.deck_images.clone(),
+            #[cfg(test)]
+            deck_fonts: self.deck_fonts.clone(),
             files: self.files.clone(),
             apps: self.apps.clone(),
             supports_images: self.supports_images,

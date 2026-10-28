@@ -1,7 +1,9 @@
 //! Shared, self-contained design tokens and medium-specific typography.
 pub mod layouts;
 pub mod lint;
+pub mod presets;
 pub mod storage;
+pub mod taste;
 pub mod template;
 mod validate;
 
@@ -41,18 +43,21 @@ pub struct Source {
     pub sha256: String,
 }
 
-/// Slide-space rhythm, in pixels.
+/// Slide-space rhythm, in pixels. `radius` is the corner of the layouts'
+/// cards and photos; smaller corners in them scale with it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Spacing {
     pub margin: f64,
     pub gap: f64,
+    pub radius: f64,
 }
 impl Default for Spacing {
     fn default() -> Self {
         Self {
             margin: 120.0,
             gap: 32.0,
+            radius: 32.0,
         }
     }
 }
@@ -250,6 +255,7 @@ pub fn derive_styles(
         };
         slide.insert(name.into(), font);
     }
+    slide.insert("kicker".into(), kicker(&slide));
     // A page quote is set like running text, one step up and in italic; only a
     // slide quote is a display size.
     if let Some(quote) = doc.get_mut("quote") {
@@ -262,6 +268,22 @@ pub fn derive_styles(
     (slide, doc)
 }
 
+/// The small label above a slide title: the caption size, set in capitals
+/// with open tracking in the accent color.
+fn kicker(slide: &BTreeMap<String, Font>) -> Font {
+    Font {
+        family: Some("body".into()),
+        size: slide.get("caption").and_then(|f| f.size),
+        weight: Some(600),
+        italic: Some(false),
+        line_height: Some(1.2),
+        letter_spacing: Some(0.14),
+        color: Some("accent".into()),
+        transform: Some(crate::deck::Transform::Uppercase),
+        ..Font::default()
+    }
+}
+
 /// Caller-owned lookup keeps operations independent of the filesystem.
 pub type Resolver<'a> = dyn Fn(&str) -> anyhow::Result<Design> + 'a;
 
@@ -271,6 +293,8 @@ pub(crate) fn resolve(slug: &str, resolver: Option<&Resolver<'_>>) -> anyhow::Re
         resolver(slug)
     } else if slug == "nexus" {
         Ok(Design::default())
+    } else if let Some(design) = presets::preset(slug) {
+        Ok(design)
     } else {
         anyhow::bail!("unknown design {slug:?}; fix: supply a design resolver or use nexus")
     }

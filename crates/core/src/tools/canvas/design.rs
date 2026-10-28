@@ -55,15 +55,22 @@ impl ToolBox {
                         },
                         |s| format!("template {}", s.template),
                     );
+                    let character = design::presets::catalog()
+                        .into_iter()
+                        .find(|(preset, _)| *preset == slug)
+                        .filter(|_| source == "built-in")
+                        .map(|(_, character)| format!(" · {character}"))
+                        .unwrap_or_default();
                     let _ = writeln!(
                         out,
-                        "{slug} · {source}{}",
+                        "{slug} · {source}{}{character}",
                         if slug == default { " · default" } else { "" }
                     );
                 }
                 if !out.contains(" · template ") {
                     out.push_str("templates: none yet\n");
                 }
+                out.push_str(self.art_once());
                 Ok(out)
             }
             Some("read") => {
@@ -143,6 +150,12 @@ impl ToolBox {
     }
 
     pub(super) fn append_design_lint(&self, out: &mut String, deck: &Deck) -> Result<()> {
+        if let Some(line) = design::taste::summary(&design::taste::hints(deck)) {
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            let _ = writeln!(out, "{line}");
+        }
         if let Some(slug) = &deck.design {
             let design = design::load(&self.space_files_dir, slug)?;
             if let Some(line) = design::summary(&design::lint_deck(deck, &design)) {

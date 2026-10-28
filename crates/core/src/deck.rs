@@ -8,6 +8,7 @@ pub mod direct;
 pub mod effects;
 pub mod export;
 pub mod feedback;
+pub mod google_fonts;
 pub mod history;
 pub mod import;
 pub mod layout;

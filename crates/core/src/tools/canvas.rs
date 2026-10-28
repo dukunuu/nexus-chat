@@ -537,6 +537,17 @@ const SCHEMA: &str = "\nschema (sent once per session)\n\
 - import: create from:\"file.pptx\" places content absolutely, copies pictures with baked crops, and keeps text/tables/notes/transitions. Radial shapes become stacked ellipses, charts placeholders, SmartArt shapes or lists. Approximations are reported; rebuild with the original's text/images only.\n\
 - set_layout converts children like Figma (none to row/column makes them auto; back makes them absolute where they are). wrap{ids,layout} puts siblings in a new frame; unwrap{id} dissolves it. update_node merges: {\"font\":{\"size\":64}} keeps other font fields, null removes one. set_text_style{name,font} changes every node using the style.\n";
 
+/// How a deck should look, sent once per session with the first design list
+/// or deck create: the habits that separate a designed deck from a generic one.
+const ART: &str = "\nart direction (sent once per session)\n\
+- Choose the look before create: pass design (a brand template beats a preset; presets suit their topic as listed by design op=list). Or set_theme your own: one dominant ground, one deep panel color (accent2), one sharp accent used sparingly, and a display face (heading) over a plain body face; any Google Fonts family is fetched automatically.\n\
+- Headlines carry the point: \"Churn fell 18% after onboarding changed\", not \"Churn\". Use the named styles (title, heading, kicker, body, caption, display), not px sizes: title is 120 px or more; body never under 32 px except captions.\n\
+- Every slide has one visual anchor: a photo, a big number, a chart, a diagram of shapes, or a full-bleed color field. No slide is only a title and bullets; at most 3 short points, and prefer cards, a stat row, a timeline or a two-column contrast.\n\
+- Rhythm: no layout twice in a row; cover, section and closing slides on accent2 or a photo, the rest on bg. Left-align copy; center only covers, quotes and big numbers. Generous margins (120+), one grid, real whitespace.\n\
+- Pictures: real photos (search mode images, https) with fit cover; mask circle/arch/pill for people; a scrim (overlay) when text sits on a photo.\n\
+- Avoid: one typeface for everything, gray on white, one-off hex colors, more than six text sizes, centered paragraphs, a bar under every title, the same card grid on every slide, emoji as icons, pictures drawn from shapes.\n\
+- Before you finish: view the deck and fix every slide the taste: line names, then anything that looks crowded, faint or like a template.\n";
+
 fn author(role: &Role) -> &'static str {
     if matches!(role, Role::Model) {
         "nexus"
@@ -840,6 +851,16 @@ impl ToolBox {
         SCHEMA
     }
 
+    /// The once-per-session art direction.
+    fn art_once(&self) -> &'static str {
+        let mut context = self.deck_link.lock().expect("deck link");
+        if context.art_shown {
+            return "";
+        }
+        context.art_shown = true;
+        ART
+    }
+
     /// [`Self::schema_if_fits`] for the error path in `ToolBox::run`.
     pub(super) fn deck_schema_if_fits(&self, used: usize) -> &'static str {
         self.schema_if_fits(used)
@@ -857,6 +878,32 @@ impl ToolBox {
             }
             Ok(())
         })
+    }
+
+    /// Download the Google Fonts `deck` uses that this device lacks into the
+    /// deck folder's assets and list them in its theme, so the renders that
+    /// follow already draw them. Problems become notes; the edit goes on.
+    async fn provide_fonts(&self, path: &Path, deck: &mut Deck, notes: &mut Vec<String>) {
+        let Some(assets) = path.parent().map(|dir| dir.join("assets")) else {
+            return;
+        };
+        #[cfg(test)]
+        let Some(source) = self.deck_fonts.clone() else {
+            return;
+        };
+        #[cfg(not(test))]
+        let source: Arc<dyn crate::deck::google_fonts::Source> = {
+            static HTTP: std::sync::OnceLock<Option<Arc<crate::deck::google_fonts::Http>>> =
+                std::sync::OnceLock::new();
+            match HTTP.get_or_init(|| crate::deck::google_fonts::Http::new().ok().map(Arc::new)) {
+                Some(http) => http.clone(),
+                None => return,
+            }
+        };
+        let installed = crate::deck::text::installed_families();
+        notes.extend(
+            crate::deck::google_fonts::provide(source.as_ref(), &assets, deck, &installed).await,
+        );
     }
 
     // `self` is only used by the test seam.
@@ -996,6 +1043,7 @@ impl ToolBox {
             &designed.theme,
         )?;
         self.copy_deck_design(&mut deck, v)?;
+        self.provide_fonts(path, &mut deck, notes).await;
         write_deck(path, &deck, Who::Model)?;
         self.deck_changed(path, deck.slides.first().map(|s| s.id.clone()));
         let (problems, _) = self.fetch_images(path, &deck, &[]).await;
@@ -1009,6 +1057,7 @@ impl ToolBox {
         out.push_str(&shown.lines(&deck, path, &self.space_files_dir)?);
         let schema = self.schema_if_fits(out.chars().count());
         out.push_str(schema);
+        out.push_str(self.art_once());
         self.append_design_lint(&mut out, &deck)?;
         Ok(out)
     }
@@ -1241,7 +1290,8 @@ impl ToolBox {
                 )
             })?;
         notes.extend(prepared.notes.iter().cloned());
-        let next = prepared.next;
+        let mut next = prepared.next;
+        self.provide_fonts(path, &mut next, notes).await;
         let changed = changed_slides(&deck, &next);
         write_deck(path, &next, Who::Model)?;
         let focus = changed

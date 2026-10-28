@@ -3,21 +3,15 @@ use serde_json::{Value, json};
 
 use crate::design::Spacing;
 
+/// Weights and families come from the design's style, so a design changes
+/// every layout's typography at once.
 fn text(slot: &str, style: &str, color: &str) -> Value {
-    let weight = if matches!(style, "title" | "heading" | "subheading" | "display") {
-        700
-    } else {
-        400
-    };
     json!({"kind":"text", "slot":slot, "text":slot, "style":style,
-        "font":{"color":color, "weight":weight}, "sizing":{"w":"fill"}})
+        "font":{"color":color}, "sizing":{"w":"fill"}})
 }
 
 fn eyebrow(slot: &str, color: &str) -> Value {
-    let mut node = text(slot, "caption", color);
-    node["font"]["family"] = json!("mono");
-    node["font"]["letter_spacing"] = json!(0.08);
-    node
+    text(slot, "kicker", color)
 }
 
 fn at(mut node: Value, rect: [f64; 4]) -> Value {

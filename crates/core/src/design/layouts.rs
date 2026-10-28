@@ -53,7 +53,7 @@ pub fn builtin(spacing: Spacing) -> BTreeMap<String, Slide> {
         );
         let children = match name {
             "title" | "closing" => vec![
-                text("kicker", "caption"),
+                text("kicker", "kicker"),
                 text("title", "title"),
                 text("subtitle", "body"),
             ],
@@ -112,7 +112,7 @@ pub fn builtin(spacing: Spacing) -> BTreeMap<String, Slide> {
                 vec![row(&sides, spacing)]
             }
             "agenda" => vec![
-                text("kicker", "caption"),
+                text("kicker", "kicker"),
                 text("title", "heading"),
                 text("items", "lead"),
             ],
@@ -149,6 +149,7 @@ pub fn builtin(spacing: Spacing) -> BTreeMap<String, Slide> {
                 }
             }
         }
+        corners(&mut slide, spacing.radius / 32.0);
         // Deck validation supplies stable ids to the non-slot frame decoration.
         let deck =
             Deck::check(&json!({"version": 2, "title": name, "slides": [slide]}).to_string())
@@ -157,11 +158,33 @@ pub fn builtin(spacing: Spacing) -> BTreeMap<String, Slide> {
     }
     for (name, mut slide) in rich::builtin(spacing) {
         slide["id"] = json!(name);
+        corners(&mut slide, spacing.radius / 32.0);
         let deck = Deck::check(&json!({"version":2,"title":name,"slides":[slide]}).to_string())
             .expect("built-in layout");
         layouts.insert(name.into(), deck.slides.into_iter().next().expect("slide"));
     }
     layouts
+}
+
+/// Scale the layouts' card and photo corners (32 px and under at the default
+/// radius) to the design's; circles drawn with larger radii stay round.
+fn corners(value: &mut Value, scale: f64) {
+    if let Some(object) = value.as_object_mut() {
+        if let Some(radius) = object
+            .get("radius")
+            .and_then(Value::as_f64)
+            .filter(|r| *r <= 32.0)
+        {
+            object.insert("radius".into(), json!((radius * scale).round()));
+        }
+        for child in object.values_mut() {
+            corners(child, scale);
+        }
+    } else if let Some(items) = value.as_array_mut() {
+        for item in items {
+            corners(item, scale);
+        }
+    }
 }
 
 /// Valid slot names, sorted for deterministic hints and galleries.

@@ -655,3 +655,54 @@ async fn history_lives_beside_the_deck_and_is_not_a_deck_path() {
         .await;
     assert!(hidden.contains("hidden folders"), "{hidden}");
 }
+
+#[tokio::test]
+async fn a_designed_create_brings_its_fonts_the_art_brief_once_and_taste_hints() {
+    let Some(ttf) = crate::deck::google_fonts::installed_ttf() else {
+        return;
+    };
+    let mut f = Fixture::new();
+    f.tools.deck_fonts = Some(Arc::new(crate::deck::google_fonts::Table::family(
+        "Fraunces",
+        &[400, 600],
+        &ttf,
+    )));
+    let listed = f.run("design", json!({"op": "list"})).await;
+    assert!(
+        listed.contains("editorial · built-in · magazine serif"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("art direction (sent once per session)"),
+        "{listed}"
+    );
+    // A generic first draft: one size, only text, bullets.
+    let bullets = "- one\n- two\n- three\n- four\n- five\n- six";
+    let created = f
+        .run(
+            "create",
+            json!({"title": "Plain", "design": "editorial", "slides": [
+                {"id": "s1", "children": [{"id": "t1", "kind": "text", "text": "Topic", "font": {"size": 40}}]},
+                {"id": "s2", "children": [{"id": "t2", "kind": "text", "text": bullets, "font": {"size": 40}}]}
+            ]}),
+        )
+        .await;
+    assert!(created.starts_with("created deck"), "{created}");
+    assert!(
+        !created.contains("art direction"),
+        "the brief came with the list: {created}"
+    );
+    assert!(created.contains("taste: "), "{created}");
+    assert!(created.contains("slides 1, 2 only text"), "{created}");
+    let deck: Deck =
+        serde_json::from_str(&std::fs::read_to_string(f.file("decks/plain.deck.json")).unwrap())
+            .unwrap();
+    assert_eq!(deck.theme.fonts["heading"], "Fraunces");
+    assert!(
+        deck.theme
+            .font_files
+            .iter()
+            .any(|font| font.family == "Fraunces" && font.file == "assets/fonts/fraunces-600.ttf")
+    );
+    assert!(f.file("decks/assets/fonts/fraunces-600.ttf").exists());
+}

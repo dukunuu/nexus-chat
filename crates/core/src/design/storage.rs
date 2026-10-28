@@ -42,7 +42,10 @@ fn path(files: &Path, slug: &str) -> Result<PathBuf> {
 /// Sorted stored designs, plus the built-in fallback.
 pub fn list(files: &Path) -> Result<Vec<String>> {
     let dir = confined(files, "design")?;
-    let mut names = vec!["nexus".into()];
+    let mut names: Vec<String> = std::iter::once("nexus")
+        .chain(super::presets::catalog().into_iter().map(|(slug, _)| slug))
+        .map(Into::into)
+        .collect();
     if dir.exists() {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
@@ -68,8 +71,13 @@ pub fn list(files: &Path) -> Result<Vec<String>> {
 /// Load a stored design, falling back to the built-in for `nexus` only.
 pub fn load(files: &Path, slug: &str) -> Result<Design> {
     let path = path(files, slug)?;
-    if slug == "nexus" && !path.exists() {
-        return Ok(Design::default());
+    if !path.exists() {
+        if slug == "nexus" {
+            return Ok(Design::default());
+        }
+        if let Some(design) = super::presets::preset(slug) {
+            return Ok(design);
+        }
     }
     Design::check(&std::fs::read_to_string(path)?).map_err(|errors| {
         anyhow::anyhow!(

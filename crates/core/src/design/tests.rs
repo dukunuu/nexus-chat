@@ -93,7 +93,11 @@ fn storage_revisions_defaults_and_confinement() {
     design.name = "Brand".into();
     save(&files, "brand", &design).unwrap();
     assert_eq!(load(&files, "brand").unwrap(), design);
-    assert_eq!(list(&files).unwrap(), vec!["brand", "nexus"]);
+    // Stored designs sort in with the built-in fallback and the curated presets.
+    let listed = list(&files).unwrap();
+    assert!(listed.contains(&"brand".to_string()) && listed.contains(&"nexus".to_string()));
+    assert_eq!(listed.len(), 2 + presets::catalog().len());
+    assert!(listed.is_sorted());
     set_default(&files, "brand").unwrap();
     assert_eq!(default_slug(&files).unwrap(), "brand");
     assert!(set_default(&files, "missing").is_err());

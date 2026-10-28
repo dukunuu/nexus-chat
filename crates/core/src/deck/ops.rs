@@ -203,9 +203,27 @@ pub fn resolve_layout_request(
     let request: Request = serde_json::from_value(raw)?;
     let design = crate::design::resolve(deck.design.as_deref().unwrap_or("nexus"), resolver)?;
     let mut slide = crate::design::layouts::instantiate(&design, &request.layout, &request.slots)?;
+    inline_missing_styles(&mut slide.children, deck, &design);
     slide.id = request.id.unwrap_or_default();
     *value = serde_json::json!({"op": "add_slide", "after": request.after, "slide": slide});
     Ok(())
+}
+
+/// A deck made before its design gained a style (say `kicker`) keeps its
+/// own styles; layout text using the new one gets it inline over `body`.
+fn inline_missing_styles(nodes: &mut [Node], deck: &Deck, design: &crate::design::Design) {
+    for node in nodes {
+        if let Kind::Text { style, font, .. } = &mut node.kind
+            && !deck.theme.text_styles.contains_key(style.as_str())
+            && let Some(designed) = design.slide.text_styles.get(style.as_str())
+        {
+            *font = designed.merged(font);
+            *style = "body".into();
+        }
+        if let Some(children) = node.children_mut() {
+            inline_missing_styles(children, deck, design);
+        }
+    }
 }
 
 // -- tree helpers ----------------------------------------------------------------

@@ -1058,6 +1058,14 @@ pub fn default_text_styles() -> BTreeMap<String, Font> {
         ("subheading", style("heading", 58.0, 600, 1.2, None)),
         ("body", style("body", 42.0, 400, 1.35, None)),
         ("caption", style("body", 26.0, 400, 1.35, Some("muted"))),
+        (
+            "kicker",
+            Font {
+                letter_spacing: Some(0.14),
+                transform: Some(Transform::Uppercase),
+                ..style("body", 26.0, 600, 1.2, Some("accent"))
+            },
+        ),
         ("code", style("mono", 36.0, 400, 1.35, None)),
     ]
     .map(|(k, v)| (k.to_string(), v))

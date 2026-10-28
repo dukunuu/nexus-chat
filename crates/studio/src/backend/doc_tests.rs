@@ -821,8 +821,17 @@ fn designs_are_listed_and_applied_and_an_update_is_announced() {
         panic!("designs")
     };
     let slugs: Vec<_> = available.iter().map(|d| d.slug.as_str()).collect();
-    assert_eq!(slugs, ["nexus", "warm"]);
-    assert!(available[0].current && !available[1].current);
+    // The stored design sorts in with nexus and the curated presets.
+    assert!(
+        slugs.contains(&"warm") && slugs.contains(&"editorial") && slugs.is_sorted(),
+        "{slugs:?}"
+    );
+    let current: Vec<_> = available
+        .iter()
+        .filter(|d| d.current)
+        .map(|d| d.slug.as_str())
+        .collect();
+    assert_eq!(current, ["nexus"]);
     let (doc, ..) = doc_event(send(
         &mut backend,
         json!({"command":"DocApplyDesign","design":"warm"}),

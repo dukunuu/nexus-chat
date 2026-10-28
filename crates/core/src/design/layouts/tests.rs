@@ -474,7 +474,12 @@ fn round_trip(deck: &Deck, bytes: &[u8], assets: &Path, imported: &Path) -> (usi
                 (expected.size - actual.size).abs() <= 0.02,
                 "{name}: font size"
             );
-            assert_eq!(expected.weight, actual.weight, "{name}: weight");
+            // PPTX carries bold or regular, so a 600 subheading comes back as 700.
+            assert_eq!(
+                expected.weight >= 600,
+                actual.weight >= 600,
+                "{name}: weight"
+            );
             assert_eq!(expected.italic, actual.italic, "{name}: italic");
             counts.1 += 1;
         }

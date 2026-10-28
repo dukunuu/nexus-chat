@@ -69,13 +69,27 @@ impl Backend {
         let design = design::load(&self.files_dir, slug)?;
         design::template::materialize(&self.files_dir, &design, &asset_root(&self.path)?)?;
         let resolver = |name: &str| design::load(&self.files_dir, name);
-        let next = nexus_core::deck::ops::apply_with_resolver(
+        #[cfg_attr(test, allow(unused_mut))]
+        let mut next = nexus_core::deck::ops::apply_with_resolver(
             &self.deck,
             &[nexus_core::deck::Op::ApplyDesign {
                 design: Some(slug.into()),
             }],
             Some(&resolver),
         )?;
+        // The design's Google Fonts join the deck, so the page and exports draw
+        // them; a family that cannot be fetched draws with the fallback.
+        // Tests never reach the network.
+        #[cfg(not(test))]
+        if let Ok(http) = nexus_core::deck::google_fonts::Http::new() {
+            let installed = nexus_core::deck::text::installed_families();
+            nexus_core::deck::google_fonts::provide_blocking(
+                &http,
+                &asset_root(&self.path)?,
+                &mut next,
+                &installed,
+            );
+        }
         self.replace(next)?;
         self.known_revision = self.deck.revision();
         Ok(self.event())
