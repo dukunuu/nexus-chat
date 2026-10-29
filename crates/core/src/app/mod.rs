@@ -591,7 +591,7 @@ impl SettingsField {
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::RemoteImages => "remote images (Space toggles on/off)",
+            Self::RemoteImages => "remote images and site icons (Space toggles on/off)",
             Self::ReplyStyle => "reply style (Space cycles interactive/auto/rich/plain)",
             Self::ColumnWidth => {
                 "column width (Space cycles auto/full/100/140/180/220; or drag the column edge)"
@@ -698,7 +698,8 @@ pub const SEARCH_PROVIDERS: [&str; 6] = [
 // A settings struct is inherently many booleans; grouped by feature in the popup.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Settings {
-    /// Fetch untrusted remote images through the safe, device-local cache.
+    /// Fetch untrusted remote images and link sites' icons through the safe,
+    /// device-local cache.
     pub remote_images: bool,
     /// Model-selected layouts, preferred layouts, or no layout guidance.
     pub reply_style: String,

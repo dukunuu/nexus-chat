@@ -12,6 +12,60 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use nexus_core::markdown::{TableAlign, TableSegment};
 
+/// Glues a site badge to the URL after it, so wrapping keeps them together.
+pub(crate) const BADGE_GAP: char = '\u{a0}';
+
+/// The badge letter for an `https://` URL: its host's first letter or digit,
+/// ignoring a leading `www.`.
+pub(crate) fn badge_letter(url: &str) -> Option<char> {
+    let host = url
+        .strip_prefix("https://")?
+        .split(['/', '?', '#', ':', ')', ']', '>', '"', '\''])
+        .next()?;
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    host.chars()
+        .next()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|letter| letter.to_ascii_uppercase())
+}
+
+/// Put a site badge before every `https://` URL that starts a word: the
+/// host's letter in reversed link color, then [`BADGE_GAP`]. The history view
+/// swaps the badge for the site's icon once one is cached.
+fn badge_links(line: &Line, colors: MdColors) -> Line<'static> {
+    let badge = Style::default()
+        .fg(colors.heading)
+        .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+    let mut spans = Vec::new();
+    let mut previous: Option<char> = None;
+    for span in &line.spans {
+        let text = span.content.as_ref();
+        let mut rest = 0;
+        for (at, _) in text.match_indices("https://") {
+            let before = text[..at].chars().next_back().or(previous);
+            if before.is_some_and(|ch| !(ch.is_whitespace() || "([<\"'".contains(ch))) {
+                continue;
+            }
+            let Some(letter) = badge_letter(&text[at..]) else {
+                continue;
+            };
+            if at > rest {
+                spans.push(Span::styled(text[rest..at].to_string(), span.style));
+            }
+            spans.push(Span::styled(format!("{letter}{BADGE_GAP}"), badge));
+            rest = at;
+        }
+        if rest < text.len() {
+            spans.push(Span::styled(text[rest..].to_string(), span.style));
+        }
+        previous = text.chars().next_back().or(previous);
+    }
+    let mut out = Line::from(spans);
+    out.style = line.style;
+    out.alignment = line.alignment;
+    out
+}
+
 pub fn line_text(line: &Line) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
@@ -340,12 +394,12 @@ fn render_text(r: &mut Rendered, content: &str, width: usize, colors: MdColors) 
         match classify(line, &plain, colors.heading) {
             Block::Drop => {}
             Block::Header(body) | Block::List(body) => {
-                for l in wrap_styled_line(&body, width) {
+                for l in wrap_styled_line(&badge_links(&body, colors), width) {
                     r.push(l, id);
                 }
             }
             Block::Plain => {
-                for l in wrap_styled_line(line, width) {
+                for l in wrap_styled_line(&badge_links(line, colors), width) {
                     r.push(l, id);
                 }
             }

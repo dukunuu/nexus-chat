@@ -471,9 +471,11 @@ Chat search is available in chat and agent mode, never in research searcher tool
   generation with ffmpeg transforms)
 - **Usage analytics**: `/usage` shows token/cache/cost analytics by backend
   and model, priced from a synced catalog
-- **Terminal ergonomics**: markdown rendering, image display, @-file
-  autocomplete, mouse selection → copy, context breakdown, compaction,
-  incognito mode, per-session history
+- **Terminal ergonomics**: markdown rendering, image display, site icons
+  beside links (real icons with Kitty graphics, such as Ghostty; a colored
+  letter elsewhere; off with remote images), @-file autocomplete, mouse
+  selection → copy, context breakdown, compaction, incognito mode,
+  per-session history
 
 ### Diagrams in the terminal
 

@@ -39,6 +39,15 @@ pub(crate) fn use_fetcher_for_tests(fetcher: &Arc<Fetcher>) {
     IMAGE_CONTEXT.with_borrow_mut(|context| *context = Arc::downgrade(fetcher));
 }
 
+/// The icon of the site at `origin`, scheduling its download when needed.
+pub(crate) fn favicon(origin: &str) -> ImageStatus {
+    IMAGE_CONTEXT.with_borrow(|context| {
+        context
+            .upgrade()
+            .map_or(ImageStatus::Off, |fetcher| fetcher.favicon(origin))
+    })
+}
+
 pub(crate) fn remote_image(url: &str) -> ImageStatus {
     IMAGE_CONTEXT.with_borrow(|context| {
         context
@@ -391,6 +400,8 @@ pub struct AppView {
         std::cell::RefCell<HashMap<(String, usize), Vec<ratatui::text::Line<'static>>>>,
     /// Disposable, background-rendered TUI diagram previews.
     pub diagrams: crate::diagrams::DiagramCache,
+    /// Site icons drawn over link badges in the history.
+    pub favicons: crate::favicons::Favicons,
     /// The full-screen in-terminal image viewer's state and background jobs.
     pub image_viewer: crate::image_viewer::Viewer,
     /// Per-session history caches preserved across session switches so
@@ -612,6 +623,7 @@ impl AppView {
             remote_images,
             stream_image_cache: std::cell::RefCell::default(),
             diagrams: crate::diagrams::DiagramCache::default(),
+            favicons: crate::favicons::Favicons::default(),
             image_viewer: crate::image_viewer::Viewer::default(),
             session_caches: HashMap::new(),
             show_tool_detail: false,

@@ -5,6 +5,7 @@ mod composer;
 mod connectors_cli;
 mod diagrams;
 mod events;
+mod favicons;
 mod filter_input;
 mod flows;
 mod history_cache;
@@ -56,6 +57,7 @@ async fn main() -> Result<()> {
     let picker = ratatui_image::picker::Picker::from_query_stdio()
         .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
     app.diagrams.set_picker(picker.clone());
+    app.favicons.set_picker(picker.clone());
     app.image_viewer.set_picker(picker);
     // Capture mouse so popups are clickable/scrollable and the terminal doesn't
     // do its own screen-wide text selection. Bracketed paste delivers a native

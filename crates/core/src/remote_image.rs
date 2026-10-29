@@ -37,6 +37,14 @@ const MAX_SIDE: u32 = 1600;
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(6);
 const NEGATIVE_TTL: Duration = Duration::from_secs(600);
 const IN_FLIGHT: usize = 4;
+/// Site icons are small; anything bigger is not an icon.
+const ICON_BYTES: usize = 1024 * 1024;
+/// Icons are kept at this size: plenty for two terminal cells.
+const ICON_SIDE: u32 = 64;
+/// How much of a home page is read looking for `<link rel=icon>`.
+const PAGE_BYTES: usize = 512 * 1024;
+/// `<link rel=icon>` candidates tried after `/favicon.ico`.
+const ICON_LINKS: usize = 4;
 
 /// A nonblocking preview lookup.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,16 +182,28 @@ impl Fetcher {
     /// Look up a URL and, if needed, enqueue one bounded background download.
     #[must_use]
     pub fn request(self: &Arc<Self>, url: &str) -> Status {
+        self.schedule(url, url, false)
+    }
+
+    /// The icon of the site at `origin` (`https://host`): its `/favicon.ico`,
+    /// else the first usable `<link rel=icon>` on its home page. Only that
+    /// site is asked; vetting, caching and failure memory match images.
+    #[must_use]
+    pub fn favicon(self: &Arc<Self>, origin: &str) -> Status {
+        self.schedule(&format!("favicon {origin}"), origin, true)
+    }
+
+    fn schedule(self: &Arc<Self>, key: &str, url: &str, icon: bool) -> Status {
         if !self.enabled() {
             return Status::Off;
         }
         let mut entries = self.entries.lock().expect("image cache lock");
-        if let Some(entry) = entries.get(url)
+        if let Some(entry) = entries.get(key)
             && (entry.status != Status::Failed || entry.since.elapsed() < NEGATIVE_TTL)
         {
             return entry.status.clone();
         }
-        let path = self.path(url);
+        let path = self.path(key);
         let reason = validate_url_with(url, self.allow_loopback)
             .err()
             .map(|error| error.to_string());
@@ -196,7 +216,7 @@ impl Fetcher {
         };
         if status != Status::Loading {
             entries.insert(
-                url.into(),
+                key.into(),
                 Entry {
                     reason,
                     status: status.clone(),
@@ -210,7 +230,7 @@ impl Fetcher {
             return Status::Loading;
         };
         entries.insert(
-            url.into(),
+            key.into(),
             Entry {
                 reason: None,
                 status: Status::Loading,
@@ -218,11 +238,18 @@ impl Fetcher {
             },
         );
         let fetcher = Arc::clone(self);
-        let url = url.to_string();
+        let (key, url) = (key.to_string(), url.to_string());
         let mut preference = self.preference.subscribe();
         runtime.spawn(async move {
+            let job = async {
+                if icon {
+                    fetcher.download_favicon(&url).await
+                } else {
+                    fetcher.download(&url).await
+                }
+            };
             let result = tokio::select! {
-                result = fetcher.download(&url) => Some(result),
+                result = job => Some(result),
                 _ = preference.changed() => None,
             };
             let mut entries = fetcher.entries.lock().expect("image cache lock");
@@ -230,13 +257,13 @@ impl Fetcher {
                 // Cancelled by the preference: forget it so turning images back
                 // on retries instead of serving a stale failure.
                 None => {
-                    entries.remove(&url);
+                    entries.remove(&key);
                 }
                 Some(result) => {
                     let reason = result.as_ref().err().map(|error| format!("{error:#}"));
                     let status = result.map_or(Status::Failed, Status::Ready);
                     entries.insert(
-                        url,
+                        key,
                         Entry {
                             reason,
                             status,
@@ -246,7 +273,11 @@ impl Fetcher {
                 }
             }
             drop(entries);
-            fetcher.changes.fetch_add(1, Ordering::Relaxed);
+            // An icon is drawn over text that is already laid out, so it
+            // only needs a redraw, not a new layout generation.
+            if !icon {
+                fetcher.changes.fetch_add(1, Ordering::Relaxed);
+            }
             fetcher.wake.notify_one();
         });
         Status::Loading
@@ -330,8 +361,8 @@ impl Fetcher {
         tokio::time::timeout(self.timeout, self.download_inner(source)).await?
     }
 
-    async fn download_inner(&self, source: &str) -> Result<PathBuf> {
-        let client = reqwest::Client::builder()
+    fn client(&self) -> Result<reqwest::Client> {
+        Ok(reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .referer(false)
@@ -340,7 +371,20 @@ impl Fetcher {
                 lookup: Arc::clone(&self.lookup),
                 allow_loopback: self.allow_loopback,
             }))
-            .build()?;
+            .build()?)
+    }
+
+    /// GET `source` through vetted redirects: the final URL, the lowercased
+    /// media type (refused unless `accept`ed, before any body is read) and at
+    /// most `limit` bytes. Past the limit a `partial` read stops quietly;
+    /// otherwise it is an error.
+    async fn get(
+        &self,
+        client: &reqwest::Client,
+        source: &str,
+        (limit, partial): (usize, bool),
+        accept: impl Fn(&str) -> bool,
+    ) -> Result<(Url, String, Vec<u8>)> {
         let mut url = validate_url_with(source, self.allow_loopback)?;
         let mut hops = 0;
         let mut response = loop {
@@ -373,29 +417,206 @@ impl Fetcher {
             .unwrap_or("")
             .trim()
             .to_ascii_lowercase();
-        let format = match mime.as_str() {
-            "image/png" => image::ImageFormat::Png,
-            "image/jpeg" => image::ImageFormat::Jpeg,
-            "image/webp" => image::ImageFormat::WebP,
-            "image/gif" => image::ImageFormat::Gif,
-            _ => bail!("unsupported image content type"),
-        };
+        ensure!(accept(&mime), "unsupported content type: {mime}");
         ensure!(
-            response
-                .content_length()
-                .is_none_or(|length| length <= MAX_BYTES as u64),
+            partial
+                || response
+                    .content_length()
+                    .is_none_or(|length| length <= limit as u64),
             "image too large"
         );
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await? {
-            ensure!(bytes.len() + chunk.len() <= MAX_BYTES, "image too large");
+            if bytes.len() + chunk.len() > limit {
+                ensure!(partial, "image too large");
+                bytes.extend_from_slice(&chunk[..limit - bytes.len()]);
+                break;
+            }
             bytes.extend_from_slice(&chunk);
         }
-        let target = self.path(source);
+        Ok((url, mime, bytes))
+    }
+
+    async fn download_inner(&self, source: &str) -> Result<PathBuf> {
+        let client = self.client()?;
+        let (_, mime, bytes) = self
+            .get(&client, source, (MAX_BYTES, false), |mime| {
+                image::ImageFormat::from_mime_type(mime).is_some_and(|format| {
+                    matches!(
+                        format,
+                        image::ImageFormat::Png
+                            | image::ImageFormat::Jpeg
+                            | image::ImageFormat::WebP
+                            | image::ImageFormat::Gif
+                    )
+                })
+            })
+            .await?;
+        let format = image::ImageFormat::from_mime_type(&mime)
+            .ok_or_else(|| anyhow::anyhow!("unsupported content type: {mime}"))?;
+        self.save(source, bytes, format, MAX_SIDE).await
+    }
+
+    async fn save(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        format: image::ImageFormat,
+        side: u32,
+    ) -> Result<PathBuf> {
+        let target = self.path(key);
         let saved = target.clone();
-        tokio::task::spawn_blocking(move || sanitize_to_png(bytes, format, &saved)).await??;
+        tokio::task::spawn_blocking(move || sanitize_to_png(bytes, format, &saved, side)).await??;
         Ok(target)
     }
+
+    async fn download_favicon(&self, origin: &str) -> Result<PathBuf> {
+        let _slot = self.slots.acquire().await?;
+        ensure!(self.enabled(), "images disabled");
+        tokio::time::timeout(self.timeout, self.favicon_inner(origin)).await?
+    }
+
+    async fn favicon_inner(&self, origin: &str) -> Result<PathBuf> {
+        let client = self.client()?;
+        let key = format!("favicon {origin}");
+        let site = validate_url_with(origin, self.allow_loopback)?;
+        let first = match self
+            .icon(&client, site.join("/favicon.ico")?.as_str())
+            .await
+        {
+            Ok((bytes, format)) => return self.save(&key, bytes, format, ICON_SIDE).await,
+            Err(error) => error,
+        };
+        let (page, _, html) = self
+            .get(
+                &client,
+                site.join("/")?.as_str(),
+                (PAGE_BYTES, true),
+                |mime| matches!(mime, "text/html" | "application/xhtml+xml"),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("no site icon: {first:#}; page: {error:#}"))?;
+        for href in icon_links(&String::from_utf8_lossy(&html))
+            .into_iter()
+            .take(ICON_LINKS)
+        {
+            let Ok(url) = page.join(&href) else {
+                continue;
+            };
+            if let Ok((bytes, format)) = self.icon(&client, url.as_str()).await {
+                return self.save(&key, bytes, format, ICON_SIDE).await;
+            }
+        }
+        bail!("no site icon: {first:#}")
+    }
+
+    /// An icon's bytes and format. ICO is common and often mislabelled, so an
+    /// unknown media type is sniffed, still only among raster formats.
+    async fn icon(
+        &self,
+        client: &reqwest::Client,
+        url: &str,
+    ) -> Result<(Vec<u8>, image::ImageFormat)> {
+        use image::ImageFormat;
+        let (_, mime, bytes) = self
+            .get(client, url, (ICON_BYTES, false), |mime| {
+                matches!(
+                    mime,
+                    "image/png"
+                        | "image/jpeg"
+                        | "image/webp"
+                        | "image/x-icon"
+                        | "image/vnd.microsoft.icon"
+                        | "image/ico"
+                        | ""
+                        | "application/octet-stream"
+                        | "text/plain"
+                )
+            })
+            .await?;
+        let format = match mime.as_str() {
+            "image/png" => ImageFormat::Png,
+            "image/jpeg" => ImageFormat::Jpeg,
+            "image/webp" => ImageFormat::WebP,
+            "image/x-icon" | "image/vnd.microsoft.icon" | "image/ico" => ImageFormat::Ico,
+            "" | "application/octet-stream" | "text/plain" => image::guess_format(&bytes)?,
+            _ => bail!("unsupported icon content type"),
+        };
+        ensure!(
+            matches!(
+                format,
+                ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP | ImageFormat::Ico
+            ),
+            "unsupported icon format"
+        );
+        Ok((bytes, format))
+    }
+}
+
+/// `href`s of a page's `<link rel="… icon …">` tags, in page order, without
+/// vector icons (they need a renderer) and Safari's monochrome mask icons.
+fn icon_links(html: &str) -> Vec<String> {
+    let lower = html.to_ascii_lowercase();
+    let end = lower.find("</head").unwrap_or(lower.len());
+    let mut links = Vec::new();
+    let mut at = 0;
+    while let Some(start) = lower[at..end].find("<link") {
+        let start = at + start;
+        let close = lower[start..end]
+            .find('>')
+            .map_or(end, |close| start + close);
+        let attributes = tag_attributes(&html[start + 5..close]);
+        at = close;
+        let get = |name: &str| {
+            attributes
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        let rel = get("rel").unwrap_or_default().to_ascii_lowercase();
+        let Some(href) = get("href").filter(|href| !href.is_empty()) else {
+            continue;
+        };
+        let vector = get("type").is_some_and(|kind| kind.contains("svg"))
+            || href
+                .split(['?', '#'])
+                .next()
+                .is_some_and(|path| path.to_ascii_lowercase().ends_with(".svg"));
+        if rel.split_whitespace().any(|word| word.ends_with("icon"))
+            && !rel.contains("mask-icon")
+            && !vector
+        {
+            links.push(href.replace("&amp;", "&"));
+        }
+    }
+    links
+}
+
+/// `name=value` pairs of one tag, names lowercased; values may be quoted.
+fn tag_attributes(tag: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = tag.trim_start_matches(['/', ' ']);
+    while let Some(eq) = rest.find('=') {
+        let name = rest[..eq]
+            .rsplit(|ch: char| ch.is_whitespace())
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let value = rest[eq + 1..].trim_start();
+        let (value, tail) = if let Some(quote @ ('"' | '\'')) = value.chars().next() {
+            let body = &value[1..];
+            let close = body.find(quote).unwrap_or(body.len());
+            (&body[..close], &body[(close + 1).min(body.len())..])
+        } else {
+            let close = value
+                .find(|ch: char| ch.is_whitespace() || ch == '/')
+                .unwrap_or(value.len());
+            (&value[..close], &value[close..])
+        };
+        out.push((name, value.to_string()));
+        rest = tail;
+    }
+    out
 }
 
 /// Decode (first frame for animations), downscale, and write a PNG atomically.
@@ -403,6 +624,7 @@ fn sanitize_to_png(
     bytes: Vec<u8>,
     format: image::ImageFormat,
     target: &std::path::Path,
+    side: u32,
 ) -> Result<()> {
     let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
     let mut limits = image::Limits::default();
@@ -411,8 +633,8 @@ fn sanitize_to_png(
     limits.max_image_height = Some(16_384);
     reader.limits(limits);
     let image = reader.decode()?;
-    let image = if image.width().max(image.height()) > MAX_SIDE {
-        image.resize(MAX_SIDE, MAX_SIDE, image::imageops::FilterType::Triangle)
+    let image = if image.width().max(image.height()) > side {
+        image.resize(side, side, image::imageops::FilterType::Triangle)
     } else {
         image
     };
@@ -1006,6 +1228,105 @@ mod tests {
             .map(|entries| entries.count())
             .unwrap_or(0);
         assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn icon_links_keep_raster_icons_in_page_order() {
+        let html = r#"<html><head>
+            <link rel="stylesheet" href="/a.css">
+            <link rel="icon" type="image/svg+xml" href="/icon.svg">
+            <LINK REL='shortcut icon' HREF='/static/icon.png?v=2&amp;x=1'>
+            <link rel=mask-icon href=/mask.png>
+            <link href="https://cdn.example/touch.png" rel="apple-touch-icon" sizes="180x180"/>
+            <link rel="icon" href="">
+        </head><body><link rel="icon" href="/late.png"></body></html>"#;
+        assert_eq!(
+            icon_links(html),
+            ["/static/icon.png?v=2&x=1", "https://cdn.example/touch.png"]
+        );
+        assert!(icon_links("<link rel=icon").is_empty());
+    }
+
+    fn ico() -> Vec<u8> {
+        let image = image::RgbaImage::from_pixel(32, 32, image::Rgba([10, 120, 240, 255]));
+        let mut out = Vec::new();
+        image
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Ico)
+            .unwrap();
+        out
+    }
+
+    #[tokio::test]
+    async fn favicons_come_from_favicon_ico_or_the_pages_icon_links() {
+        let direct = serve(Duration::ZERO, |path| match path {
+            "/favicon.ico" => Reply::ok("image/vnd.microsoft.icon", ico()),
+            _ => Reply::ok("text/plain", Vec::new()),
+        })
+        .await;
+        let fetcher = test_fetcher();
+        let origin = direct.url("");
+        let path = fetcher.download_favicon(&origin).await.unwrap();
+        assert_eq!(image::open(&path).unwrap().width(), 32);
+        assert_eq!(direct.hits(), ["/favicon.ico"]);
+
+        let linked = serve(Duration::ZERO, |path| match path {
+            "/" => Reply::ok(
+                "text/html; charset=utf-8",
+                br#"<head><link rel="icon" href="/missing.png"><link rel="icon" href="/static/i.png?v=2&amp;x=1"></head>"#.to_vec(),
+            ),
+            "/static/i.png?v=2&x=1" => Reply::ok("application/octet-stream", png(200, 100)),
+            _ => Reply {
+                status: 404,
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+        })
+        .await;
+        let origin = linked.url("");
+        let generation = fetcher.generation();
+        assert!(matches!(
+            settled_icon(&fetcher, &origin).await,
+            Status::Ready(_)
+        ));
+        assert_eq!(fetcher.generation(), generation, "icons never re-layout");
+        let Status::Ready(path) = fetcher.favicon(&origin) else {
+            unreachable!()
+        };
+        let icon = image::open(&path).unwrap();
+        assert_eq!(
+            (icon.width(), icon.height()),
+            (64, 32),
+            "icons are kept small"
+        );
+        assert_eq!(
+            linked.hits(),
+            ["/favicon.ico", "/", "/missing.png", "/static/i.png?v=2&x=1"]
+        );
+        assert_ne!(
+            Some(path),
+            fetcher.cached(&origin),
+            "icons and images are cached apart"
+        );
+
+        let bare = serve(Duration::ZERO, |path| match path {
+            "/" => Reply::ok("text/html", b"<head></head>".to_vec()),
+            _ => Reply::ok("image/svg+xml", b"<svg/>".to_vec()),
+        })
+        .await;
+        assert_eq!(settled_icon(&fetcher, &bare.url("")).await, Status::Failed);
+        let text = error_text(fetcher.download_favicon(&bare.url("")).await);
+        assert!(text.contains("no site icon"), "{text}");
+    }
+
+    async fn settled_icon(fetcher: &Arc<Fetcher>, origin: &str) -> Status {
+        for _ in 0..200 {
+            let status = fetcher.favicon(origin);
+            if status != Status::Loading {
+                return status;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("icon never settled");
     }
 
     #[tokio::test]

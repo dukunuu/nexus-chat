@@ -328,6 +328,12 @@ pub(super) fn render_history(f: &mut Frame, app: &mut AppView, area: Rect) {
         .collect();
 
     f.render_widget(Paragraph::new(visible), inner);
+    app.favicons.paint(
+        f.buffer_mut(),
+        inner,
+        crate::app_view::favicon,
+        app.popup == nexus_core::app::Popup::None,
+    );
     if app.popup == nexus_core::app::Popup::None {
         let mut placements = app.history_cache.diagrams.clone();
         placements.extend(tail_diagrams.into_iter().map(|mut placement| {
