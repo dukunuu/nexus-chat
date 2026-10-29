@@ -39,8 +39,8 @@ const NEGATIVE_TTL: Duration = Duration::from_secs(600);
 const IN_FLIGHT: usize = 4;
 /// Site icons are small; anything bigger is not an icon.
 const ICON_BYTES: usize = 1024 * 1024;
-/// Icons are kept at this size: plenty for two terminal cells.
-const ICON_SIDE: u32 = 64;
+/// Icons are kept at this size: two terminal cells on a high-density screen.
+const ICON_SIDE: u32 = 128;
 /// How much of a home page is read looking for `<link rel=icon>`.
 const PAGE_BYTES: usize = 512 * 1024;
 /// `<link rel=icon>` candidates tried after `/favicon.ico`.
@@ -190,7 +190,7 @@ impl Fetcher {
     /// site is asked; vetting, caching and failure memory match images.
     #[must_use]
     pub fn favicon(self: &Arc<Self>, origin: &str) -> Status {
-        self.schedule(&format!("favicon {origin}"), origin, true)
+        self.schedule(&icon_key(origin), origin, true)
     }
 
     fn schedule(self: &Arc<Self>, key: &str, url: &str, icon: bool) -> Status {
@@ -478,36 +478,38 @@ impl Fetcher {
 
     async fn favicon_inner(&self, origin: &str) -> Result<PathBuf> {
         let client = self.client()?;
-        let key = format!("favicon {origin}");
+        let key = icon_key(origin);
         let site = validate_url_with(origin, self.allow_loopback)?;
-        let first = match self
-            .icon(&client, site.join("/favicon.ico")?.as_str())
-            .await
-        {
-            Ok((bytes, format)) => return self.save(&key, bytes, format, ICON_SIDE).await,
-            Err(error) => error,
-        };
-        let (page, _, html) = self
+        // The page's own icons first: they are usually larger than the
+        // 16–32 px `/favicon.ico`, which looks blocky drawn two cells wide.
+        let page = self
             .get(
                 &client,
                 site.join("/")?.as_str(),
                 (PAGE_BYTES, true),
                 |mime| matches!(mime, "text/html" | "application/xhtml+xml"),
             )
-            .await
-            .map_err(|error| anyhow::anyhow!("no site icon: {first:#}; page: {error:#}"))?;
-        for href in icon_links(&String::from_utf8_lossy(&html))
-            .into_iter()
-            .take(ICON_LINKS)
-        {
-            let Ok(url) = page.join(&href) else {
-                continue;
-            };
-            if let Ok((bytes, format)) = self.icon(&client, url.as_str()).await {
-                return self.save(&key, bytes, format, ICON_SIDE).await;
+            .await;
+        if let Ok((page, _, html)) = &page {
+            for href in icon_links(&String::from_utf8_lossy(html))
+                .into_iter()
+                .take(ICON_LINKS)
+            {
+                let Ok(url) = page.join(&href) else {
+                    continue;
+                };
+                if let Ok((bytes, format)) = self.icon(&client, url.as_str()).await {
+                    return self.save(&key, bytes, format, ICON_SIDE).await;
+                }
             }
         }
-        bail!("no site icon: {first:#}")
+        match self
+            .icon(&client, site.join("/favicon.ico")?.as_str())
+            .await
+        {
+            Ok((bytes, format)) => self.save(&key, bytes, format, ICON_SIDE).await,
+            Err(error) => bail!("no site icon: {error:#}"),
+        }
     }
 
     /// An icon's bytes and format. ICO is common and often mislabelled, so an
@@ -553,8 +555,14 @@ impl Fetcher {
     }
 }
 
-/// `href`s of a page's `<link rel="… icon …">` tags, in page order, without
-/// vector icons (they need a renderer) and Safari's monochrome mask icons.
+/// Cache key of a site's icon; the version retires icons fetched smallest-first.
+fn icon_key(origin: &str) -> String {
+    format!("favicon2 {origin}")
+}
+
+/// `href`s of a page's `<link rel="… icon …">` tags, largest declared size
+/// first (an Apple touch icon counts as 180 px, an icon without sizes as 0),
+/// without vector icons (they need a renderer) and Safari's mask icons.
 fn icon_links(html: &str) -> Vec<String> {
     let lower = html.to_ascii_lowercase();
     let end = lower.find("</head").unwrap_or(lower.len());
@@ -586,10 +594,22 @@ fn icon_links(html: &str) -> Vec<String> {
             && !rel.contains("mask-icon")
             && !vector
         {
-            links.push(href.replace("&amp;", "&"));
+            let declared = get("sizes")
+                .unwrap_or_default()
+                .split_whitespace()
+                .filter_map(|size| size.split_once(['x', 'X']))
+                .filter_map(|(width, _)| width.parse::<u32>().ok())
+                .max();
+            let size = declared.unwrap_or(if rel.contains("apple-touch-icon") {
+                180
+            } else {
+                0
+            });
+            links.push((size, href.replace("&amp;", "&")));
         }
     }
-    links
+    links.sort_by_key(|(size, _)| std::cmp::Reverse(*size));
+    links.into_iter().map(|(_, href)| href).collect()
 }
 
 /// `name=value` pairs of one tag, names lowercased; values may be quoted.
@@ -608,10 +628,18 @@ fn tag_attributes(tag: &str) -> Vec<(String, String)> {
             let close = body.find(quote).unwrap_or(body.len());
             (&body[..close], &body[(close + 1).min(body.len())..])
         } else {
-            let close = value
-                .find(|ch: char| ch.is_whitespace() || ch == '/')
-                .unwrap_or(value.len());
-            (&value[..close], &value[close..])
+            // Unquoted values run to whitespace; a closing `/>` is not part of one.
+            let close = value.find(char::is_whitespace).unwrap_or(value.len());
+            let token = &value[..close];
+            let tail = &value[close..];
+            (
+                if tail.trim().is_empty() {
+                    token.strip_suffix('/').unwrap_or(token)
+                } else {
+                    token
+                },
+                tail,
+            )
         };
         out.push((name, value.to_string()));
         rest = tail;
@@ -1231,7 +1259,7 @@ mod tests {
     }
 
     #[test]
-    fn icon_links_keep_raster_icons_in_page_order() {
+    fn icon_links_keep_raster_icons_largest_first() {
         let html = r#"<html><head>
             <link rel="stylesheet" href="/a.css">
             <link rel="icon" type="image/svg+xml" href="/icon.svg">
@@ -1242,8 +1270,10 @@ mod tests {
         </head><body><link rel="icon" href="/late.png"></body></html>"#;
         assert_eq!(
             icon_links(html),
-            ["/static/icon.png?v=2&x=1", "https://cdn.example/touch.png"]
+            ["https://cdn.example/touch.png", "/static/icon.png?v=2&x=1"]
         );
+        let sized = r#"<link rel=icon href=/16.png sizes=16x16><link rel=icon href=/96.png sizes="96x96"><link rel=apple-touch-icon href=/touch.png>"#;
+        assert_eq!(icon_links(sized), ["/touch.png", "/96.png", "/16.png"]);
         assert!(icon_links("<link rel=icon").is_empty());
     }
 
@@ -1267,7 +1297,11 @@ mod tests {
         let origin = direct.url("");
         let path = fetcher.download_favicon(&origin).await.unwrap();
         assert_eq!(image::open(&path).unwrap().width(), 32);
-        assert_eq!(direct.hits(), ["/favicon.ico"]);
+        assert_eq!(
+            direct.hits(),
+            ["/", "/favicon.ico"],
+            "no page icons, then the ico"
+        );
 
         let linked = serve(Duration::ZERO, |path| match path {
             "/" => Reply::ok(
@@ -1295,12 +1329,13 @@ mod tests {
         let icon = image::open(&path).unwrap();
         assert_eq!(
             (icon.width(), icon.height()),
-            (64, 32),
+            (128, 64),
             "icons are kept small"
         );
         assert_eq!(
             linked.hits(),
-            ["/favicon.ico", "/", "/missing.png", "/static/i.png?v=2&x=1"]
+            ["/", "/missing.png", "/static/i.png?v=2&x=1"],
+            "page icons come before the usually tiny favicon.ico"
         );
         assert_ne!(
             Some(path),

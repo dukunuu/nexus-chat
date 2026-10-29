@@ -13,9 +13,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Rect, Size};
 use ratatui::style::{Color, Modifier};
 use ratatui::widgets::Widget;
-use ratatui_image::Resize;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
+use ratatui_image::{FilterType, Resize};
 
 use crate::ui::markdown::BADGE_GAP;
 
@@ -83,10 +83,31 @@ fn load(path: &Path, picker: Option<&Picker>) -> Icon {
     let color = average(&image);
     let protocol = picker.and_then(|picker| {
         picker
-            .new_protocol(image, Size::new(2, 1), Resize::Fit(None))
+            .new_protocol(
+                fitted(&image, picker.font_size()),
+                Size::new(2, 1),
+                Resize::Fit(Some(FilterType::Lanczos3)),
+            )
             .ok()
     });
     Icon { protocol, color }
+}
+
+/// `image` scaled smoothly into the pixels of two cells, centred on a
+/// transparent square. The library's default nearest-neighbour resize makes
+/// small icons jagged.
+fn fitted(image: &image::DynamicImage, font: ratatui_image::FontSize) -> image::DynamicImage {
+    let (width, height) = (u32::from(font.width) * 2, u32::from(font.height));
+    let side = width.min(height).max(1);
+    let scaled = image.resize(side, side, FilterType::Lanczos3);
+    let mut canvas = image::RgbaImage::new(width, height);
+    image::imageops::overlay(
+        &mut canvas,
+        &scaled.to_rgba8(),
+        i64::from((width - scaled.width()) / 2),
+        i64::from((height - scaled.height()) / 2),
+    );
+    image::DynamicImage::ImageRgba8(canvas)
 }
 
 /// The mean color of an icon's visible pixels.
@@ -228,6 +249,27 @@ mod tests {
             "the host may go on past the edge"
         );
         assert_eq!(badges(&buffer, Rect::new(0, 1, 40, 1)).len(), 1);
+    }
+
+    #[test]
+    fn icons_are_scaled_smoothly_into_a_centred_two_cell_box() {
+        let icon = image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(16, 16, |x, y| {
+            image::Rgba([if (x + y) % 2 == 0 { 255 } else { 0 }, 0, 0, 255])
+        }));
+        let font = ratatui_image::FontSize::new(10, 24);
+        let boxed = fitted(&icon, font).to_rgba8();
+        assert_eq!(boxed.dimensions(), (20, 24));
+        assert_eq!(
+            boxed.get_pixel(10, 0)[3],
+            0,
+            "the padding stays transparent"
+        );
+        assert_eq!(boxed.get_pixel(10, 12)[3], 255);
+        let blended = boxed
+            .pixels()
+            .filter(|pixel| pixel[3] == 255 && (40..=215).contains(&pixel[0]))
+            .count();
+        assert!(blended > 100, "a smooth filter blends the checkerboard");
     }
 
     #[test]
