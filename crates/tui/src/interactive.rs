@@ -25,6 +25,7 @@ use unicode_width::UnicodeWidthStr;
 mod components;
 pub(crate) mod live;
 mod persist;
+mod practice;
 pub(crate) use persist::{flush, open_pinned, pin_focused, sync_saved};
 
 /// Fixed image reservation with a visible, centered failure placeholder.
@@ -102,6 +103,10 @@ enum Control {
     Rating(usize),
     Slider(usize),
     Copy(usize),
+    Editor(usize),
+    Choice(usize, usize),
+    Quiz(usize),
+    Reveal(usize),
     Load,
 }
 struct Entry {
@@ -155,6 +160,11 @@ impl Entry {
                         Node::Rating { .. } => vec![Control::Rating(index)],
                         Node::Slider { .. } => vec![Control::Slider(index)],
                         Node::Code { .. } => vec![Control::Copy(index)],
+                        Node::Editor { .. } => vec![Control::Editor(index)],
+                        Node::Choice { options, .. } => (0..options.len())
+                            .map(|option| Control::Choice(index, option))
+                            .collect(),
+                        Node::Quiz { .. } => vec![Control::Quiz(index), Control::Reveal(index)],
                         _ => Vec::new(),
                     })
                     .chain(session.needs_data_load().then_some(Control::Load))
@@ -256,6 +266,18 @@ impl Entry {
                 session.copy_code(node);
                 return None;
             }
+            Control::Editor(node) => session.set_editing(node, true).map(|()| None),
+            Control::Choice(node, option) => session.choose(node, option).map(|()| None),
+            Control::Quiz(node) => {
+                let count = match session.document().node(node) {
+                    Some(Node::Quiz { items, .. }) => items.len(),
+                    _ => 1,
+                };
+                session
+                    .select_question(node, (session.question(node) + 1) % count)
+                    .map(|()| None)
+            }
+            Control::Reveal(node) => session.reveal(node).map(|()| None),
             Control::Input(_) | Control::Stepper(_) | Control::Table(..) | Control::Slider(_) => {
                 return None;
             }
@@ -309,6 +331,17 @@ impl Entry {
                 } else {
                     session.expand_section(node, section)
                 }
+            }
+            (Control::Quiz(node), KeyCode::Left | KeyCode::Right) => {
+                let question = session.question(node);
+                session.select_question(
+                    node,
+                    if code == KeyCode::Right {
+                        question + 1
+                    } else {
+                        question.saturating_sub(1)
+                    },
+                )
             }
             (Control::Rating(node), KeyCode::Left | KeyCode::Right) => {
                 let Some(Node::Rating { key, .. }) = session.document().node(node) else {
@@ -407,6 +440,18 @@ impl Entry {
             }
             return;
         }
+        if let Some(Control::Editor(node)) = control {
+            if !backspace {
+                self.error = session
+                    .edit_code(
+                        node,
+                        &nexus_core::interactive::EditorKey::Insert(text.into()),
+                    )
+                    .err()
+                    .map_or_else(String::new, |error| error.to_string());
+            }
+            return;
+        }
         let Some(Control::Input(key)) = control else {
             return;
         };
@@ -441,6 +486,8 @@ impl Entry {
             persist::url_prompt(url, usize::from(width))
         } else if choices > 0 {
             format!("1–{choices} pick · F2 keyboard")
+        } else if focused && practice::editing(self).is_some() {
+            "typing edits the code · Esc stop editing".into()
         } else if focused {
             "Tab next · Enter press · Esc done".into()
         } else {
@@ -2711,6 +2758,17 @@ impl Widgets {
                 }
                 (true, None)
             }
+            Some((index, control @ (Control::Editor(_) | Control::Quiz(_)))) => {
+                entry.focus = index;
+                self.focused = Some(hit.key);
+                if !practice::click(entry, &control, pos, hit.rect, hit.row_offset) {
+                    return (
+                        true,
+                        entry.activate(index, can_send, self.answer_blocked.is_none()),
+                    );
+                }
+                (true, None)
+            }
             Some((
                 index,
                 control @ (Control::Tabs(_)
@@ -2730,7 +2788,10 @@ impl Widgets {
                     )
                 }
             }
-            Some((index, Control::Toggle(_) | Control::Select(_))) => {
+            Some((
+                index,
+                Control::Toggle(_) | Control::Select(_) | Control::Choice(..) | Control::Reveal(_),
+            )) => {
                 self.focused = Some(hit.key);
                 (
                     true,
@@ -2774,6 +2835,15 @@ impl Widgets {
             if matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('a')) {
                 self.resolve_url(key.code);
             }
+            return (false, None);
+        }
+        if let Some(entry) = self
+            .focused
+            .as_ref()
+            .and_then(|key| self.entries.get_mut(key))
+            && let Some(node) = practice::editing(entry)
+            && practice::editor_key(entry, node, key.code)
+        {
             return (false, None);
         }
         if matches!(key.code, KeyCode::Esc | KeyCode::F(2)) {
@@ -3236,3 +3306,7 @@ mod stream_tests;
 #[cfg(test)]
 #[path = "interactive/extended_tests.rs"]
 mod extended_tests;
+
+#[cfg(test)]
+#[path = "interactive/practice_tests.rs"]
+mod practice_tests;

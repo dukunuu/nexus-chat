@@ -42,6 +42,10 @@ Bindable arguments take `$name`, not a quoted key:
 - `Toggle($ready, "Ready")`: flip a boolean.
 - `Checklist([Check("Beach", $beach), Check("Hiking", $hiking)])`.
 - `Table(["Name"], [["Ada"]], $row)`: optional numeric row selection.
+- `Editor($code, "Solution", "python", 8)`: multi-line code editor, 3–16 rows;
+  Enter starts editing, Esc stops. `$code` holds starter code (spaces, no tabs).
+- `Choice($pick, "Pick one", ["Hash map", "List"], "Hash map")`: radio list;
+  `$pick = ""` until picked. The optional answer marks right/wrong once picked.
 
 Numeric expressions support `$state`, literals, named references, parentheses,
 `+ - * / %`, comparisons `== != < > <= >=`, booleans `&& || !`, and
@@ -119,13 +123,18 @@ Rating: numeric stars; arrows/click edit.
 Code: literal source, optional language, Copy button.
 Badge: compact themed text. Meter: themed gauge.
 Slider: numeric range; arrows/click adjust by step.
+Quiz: Question(prompt, view?, answer?, explain?) children, one shown at a time;
+arrows page, Show answer reveals, header counts right Choice answers. For
+interview/practice sets put Editor/Choice/Input in each question and end with
+`Button("Grade my answers", @ToAssistant("Grade my answers"), true)`: all state,
+including code, goes with it.
 
 Source ≤16 KiB; ≤128 named statements; ≤16 visible nodes; ≤32 state fields,
 32 controls/actions and 128 action steps. Interactive-only panels have 21 declared
 node rows; display layouts have 45. Text and buttons declare 1–8 rows; text wraps
 at actual width. Image rows 4–12. Lists are bounded: buttons/checks/bars/steps ≤8,
-cards/stats ≤6, table ≤6 columns (8 rows, or 64 with pagination), sparkline/chart ≤64 samples. Text ≤4096
-bytes; scalar strings ≤1024; titles/labels/art lines ≤120; identifiers ≤32 ASCII
+cards/stats ≤6, table ≤6 columns (8 rows, or 64 with pagination), sparkline/chart ≤64 samples. Text and editor code ≤4096
+bytes; other scalar strings ≤1024; titles/labels/art lines ≤120; identifiers ≤32 ASCII
 letters/digits/underscores; finite numbers ≤1e12. Keep UIs compact.
 
 Data arrays/objects ≤200 entries, depth ≤12, bounded evaluation work.

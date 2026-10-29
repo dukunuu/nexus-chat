@@ -18,9 +18,12 @@ fn every_new_signature_lowers_and_every_prefix_is_safe() {
         "Badge(\"Ready\", \"success\")",
         "Meter(\"Done\", $n, 5, \"warning\")",
         "Slider($n, \"Level\", 0, 10, 1)",
+        "Editor($name, \"Code\", \"rust\", 4)",
+        "Choice($name, \"Who\", [\"Ada\", \"Bob\"], \"Ada\")",
+        "Quiz([Question(\"Q1\", [Toggle($ok, \"Sure\")], \"Yes\", \"Why\"), Question(\"Q2\")], $n)",
     ] {
         let source = format!(
-            "root = Panel(\"Demo\", [Text(\"Arriving\"), {component}])\n$n = 0\n$name = \"Ada\"\n"
+            "root = Panel(\"Demo\", [Text(\"Arriving\"), {component}])\n$n = 0\n$name = \"Ada\"\n$ok = false\n"
         );
         let document =
             Document::check(&source).unwrap_or_else(|errors| panic!("{component}: {errors:?}"));

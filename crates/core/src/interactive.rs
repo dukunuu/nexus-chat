@@ -10,6 +10,8 @@ use serde_json::{Map, Value, json};
 
 mod components;
 pub use components::{ChartKind, ChartSeries, Section, Tab, TableState, TimelineEvent};
+mod practice;
+pub use practice::{EditorKey, EditorState, Question, line_col};
 mod data;
 pub mod live;
 mod persist;
@@ -525,6 +527,36 @@ pub enum Node {
         /// Positive step.
         step: f64,
     },
+    /// A multi-line code editor bound to string state.
+    Editor {
+        /// Bound string field.
+        key: String,
+        /// Label template.
+        label: String,
+        /// Optional language token for highlighting.
+        lang: Option<String>,
+        /// Visible editing rows, three to sixteen.
+        #[serde(default = "practice::eight")]
+        rows: u16,
+    },
+    /// A vertical single-choice list that marks the right answer once picked.
+    Choice {
+        /// Bound string field; empty until something is picked.
+        key: String,
+        /// Label template.
+        label: String,
+        /// Two to eight option templates.
+        options: Vec<String>,
+        /// Optional correct option.
+        answer: Option<String>,
+    },
+    /// Questions shown one at a time, each with an optional revealable answer.
+    Quiz {
+        /// One to twelve questions.
+        items: Vec<Question>,
+        /// Optional numeric current-question binding.
+        key: Option<String>,
+    },
     /// A locally toggleable boolean field.
     Toggle {
         /// Bound boolean state field.
@@ -649,6 +681,14 @@ impl Node {
                     .sum(),
             ),
             Self::Code { source, .. } => bounded_rows(source.lines().count().max(1) + 1),
+            Self::Editor { rows, .. } => rows.saturating_add(1),
+            Self::Choice { options, .. } => bounded_rows(options.len() + 1),
+            Self::Quiz { items, .. } => items
+                .iter()
+                .map(Question::rows)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
             Self::Bars { items } => u16::try_from(items.len()).unwrap_or(u16::MAX),
             Self::Checklist { items } => u16::try_from(items.len()).unwrap_or(u16::MAX),
             Self::Rating { .. }
@@ -732,7 +772,7 @@ pub struct CheckError {
 }
 
 /// Valid presentation node types, shared by validation and tool reports.
-pub const NODE_TYPES: &str = "hero, image, columns, cards, stats, steps, callout, quote, divider, text, buttons, input, kv, table, progress, bars, sparkline, checklist, select, stepper, toggle, tabs, accordion, chart, form, timeline, rating, code, badge, meter, slider";
+pub const NODE_TYPES: &str = "hero, image, columns, cards, stats, steps, callout, quote, divider, text, buttons, input, kv, table, progress, bars, sparkline, checklist, select, stepper, toggle, tabs, accordion, chart, form, timeline, rating, code, badge, meter, slider, editor, choice, quiz";
 const ACTION_OPS: &str = "set, call, run, send, answer, reset, open_url, to_assistant";
 const EXPR_OPS: &str = "get, random, not, number, if, add, sub, mul, div, mod, eq, lt, gt, and, or, literal, object, array, field, index, count, first, last, sum, avg, min, max, filter, sort, round, abs, floor, ceil";
 const MAX_ERRORS: usize = 10;
@@ -875,6 +915,9 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
                 ("node", "code") => "source:string lang:?string",
                 ("node", "badge") => "text:string tone:tone",
                 ("node", "meter") => "label:string value:value max:value tone:tone",
+                ("node", "editor") => "key:string label:string lang:?string rows:u16",
+                ("node", "choice") => "key:string label:string options:string[] answer:?string",
+                ("node", "quiz") => "items:question[] key:?string",
                 ("step", "set") => "key:string value:value",
                 ("step", "call") => "action:string",
                 ("step", "run") => "id:string",
@@ -908,6 +951,10 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
         "display_step" => (shape, "title:string text:?string state:step_state"),
         "tab" => (shape, "label:string view:node[]"),
         "section" => (shape, "title:string view:node[] open:bool"),
+        "question" => (
+            shape,
+            "title:string view:node[] answer:?string explain:?string",
+        ),
         "series" => (shape, "name:string values:value[] tone:tone"),
         "event" => (shape, "time:string title:string text:?string tone:tone"),
         "bar" => (shape, "label:string value:value"),
@@ -956,15 +1003,15 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
             }
         }
         "columns" | "cards" | "stats" | "steps" | "buttons" | "kv" | "bars" | "checklist"
-        | "tabs" | "accordion" | "timeline" => "items",
+        | "tabs" | "accordion" | "timeline" | "quiz" => "items",
         "callout" => "tone text",
         "image" => "src",
         "quote" | "text" | "column_item" | "send" | "badge" | "to_assistant" => "text",
-        "input" | "toggle" | "check" | "rating" => "key label",
+        "input" | "toggle" | "check" | "rating" | "editor" => "key label",
         "table" => "columns rows_data",
         "progress" | "bar" | "meter" => "label value",
         "sparkline" => "values",
-        "select" => "key label options",
+        "select" | "choice" => "key label options",
         "stepper" | "slider" => "key label min max step",
         "tab" => "label view",
         "section" => "title view",
@@ -981,7 +1028,7 @@ fn check_shape(value: &Value, path: &str, shape: &str, errors: &mut Vec<CheckErr
         "button" => "label action",
         "card" => "title text",
         "stat" => "value label",
-        "display_step" => "title",
+        "display_step" | "question" => "title",
         _ => "",
     };
     for field in required.split_whitespace() {
@@ -1463,8 +1510,11 @@ impl Document {
             Node::Image { .. } | Node::Table { .. } | Node::Chart { .. } => 12,
             Node::Buttons { .. } => 14,
             Node::Steps { .. } | Node::Timeline { .. } => 16,
-            Node::Hero { .. } | Node::Code { .. } => 9,
-            Node::Tabs { .. } | Node::Accordion { .. } | Node::Form { .. } => 45,
+            Node::Hero { .. } | Node::Code { .. } | Node::Choice { .. } => 9,
+            Node::Editor { .. } => 17,
+            Node::Tabs { .. } | Node::Accordion { .. } | Node::Form { .. } | Node::Quiz { .. } => {
+                45
+            }
             _ => 8,
         };
         ensure!(
@@ -1811,8 +1861,11 @@ impl Document {
                 | Node::Input { .. }
                 | Node::Select { .. }
                 | Node::Stepper { .. }
-                | Node::Toggle { .. } => 1,
+                | Node::Toggle { .. }
+                | Node::Editor { .. } => 1,
                 Node::Accordion { items } => items.len(),
+                Node::Choice { options, .. } => options.len(),
+                Node::Quiz { .. } => 2,
                 Node::Table {
                     select,
                     sortable,
@@ -2122,6 +2175,24 @@ impl Session {
                 })
                 .collect(),
             Node::Code { source, .. } => vec![source.clone()],
+            Node::Editor { key, label, .. } => {
+                vec![format!("{}:", text(label)), self.value(key)]
+            }
+            Node::Choice {
+                key,
+                label,
+                options,
+                ..
+            } => std::iter::once(format!("{}: {}", text(label), self.value(key)))
+                .chain(options.iter().map(|option| format!("- {}", text(option))))
+                .collect(),
+            Node::Quiz { items, .. } => items
+                .iter()
+                .flat_map(|item| {
+                    std::iter::once(text(&item.title))
+                        .chain(item.view.iter().flat_map(|node| self.plain_node(node)))
+                })
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -2687,6 +2758,31 @@ impl Session {
                         ),
                     );
                 }
+                Node::Editor { key, .. } => practice::code_ok(&state[key])?,
+                Node::Choice { key, options, .. } => {
+                    ensure!(
+                        state[key]
+                            .as_str()
+                            .is_some_and(|s| s.is_empty() || options.iter().any(|o| o == s)),
+                        "choice value must be empty or an option"
+                    );
+                }
+                Node::Quiz {
+                    key: Some(key),
+                    items,
+                } => {
+                    let max = u32::try_from(items.len().saturating_sub(1))?;
+                    let value = number(&state[key])?.clamp(0.0, f64::from(max));
+                    state.insert(
+                        key.clone(),
+                        json!(
+                            (0..=max)
+                                .rev()
+                                .find(|index| f64::from(*index) <= value)
+                                .unwrap_or(0)
+                        ),
+                    );
+                }
                 Node::Rating { key, max, .. } => {
                     let value = number(&state[key])?.clamp(0.0, f64::from(*max));
                     state.insert(
@@ -2814,7 +2910,7 @@ fn input_ok(value: &Value) -> Result<()> {
 fn scalar_ok(value: &Value) -> Result<()> {
     match value {
         Value::Null | Value::Bool(_) => Ok(()),
-        Value::String(text) => text_ok(text, MAX_VALUE),
+        Value::String(text) => text_ok(text, MAX_TEXT),
         Value::Number(number) => {
             ensure!(
                 number

@@ -1,13 +1,13 @@
 //! Additional bounded components and their local interaction state.
 
 use super::{
-    Document, MAX_TEXT, MAX_VALUE, Node, Session, Step, Tone, binding_ok, item_count, line_ok,
-    spend, text_ok,
+    Document, MAX_TEXT, MAX_VALUE, Node, Question, Session, Step, Tone, binding_ok, item_count,
+    line_ok, spend, text_ok,
 };
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One labelled tab and its child view.
 #[derive(Clone, Debug, Deserialize)]
@@ -92,6 +92,7 @@ fn children(node: &Node) -> Vec<&[Node]> {
         Node::Tabs { items, .. } => items.iter().map(|item| item.view.as_slice()).collect(),
         Node::Accordion { items } => items.iter().map(|item| item.view.as_slice()).collect(),
         Node::Form { fields, .. } => vec![fields],
+        Node::Quiz { items, .. } => items.iter().map(|item| item.view.as_slice()).collect(),
         _ => Vec::new(),
     }
 }
@@ -101,6 +102,11 @@ pub(super) fn max_visible(nodes: &[Node]) -> usize {
         .map(|node| {
             1 + match node {
                 Node::Tabs { items, .. } => items
+                    .iter()
+                    .map(|item| max_visible(&item.view))
+                    .max()
+                    .unwrap_or(0),
+                Node::Quiz { items, .. } => items
                     .iter()
                     .map(|item| max_visible(&item.view))
                     .max()
@@ -120,7 +126,7 @@ pub(super) fn tree_ok(nodes: &[Node], depth: usize, budget: &mut usize) -> Resul
     }
     Ok(())
 }
-fn walk<'a>(nodes: &'a [Node], out: &mut Vec<&'a Node>) {
+pub(super) fn walk<'a>(nodes: &'a [Node], out: &mut Vec<&'a Node>) {
     for node in nodes {
         out.push(node);
         for branch in children(node) {
@@ -196,6 +202,8 @@ impl Document {
                             | Node::Checklist { .. }
                             | Node::Slider { .. }
                             | Node::Rating { .. }
+                            | Node::Editor { .. }
+                            | Node::Choice { .. }
                     )),
                     "form fields must be bound controls"
                 );
@@ -260,16 +268,12 @@ impl Document {
                     "code needs at most eight lines"
                 );
                 if let Some(lang) = lang {
-                    ensure!(
-                        lang.len() <= 32
-                            && lang
-                                .bytes()
-                                .all(|c| c.is_ascii_alphanumeric()
-                                    || matches!(c, b'_' | b'-' | b'+')),
-                        "invalid code language token"
-                    );
+                    lang_ok(lang)?;
                 }
                 controls = 1;
+            }
+            Node::Editor { .. } | Node::Choice { .. } | Node::Quiz { .. } => {
+                controls = self.validate_practice(node)?;
             }
             Node::Badge { text, .. } => Self::template_ok(text)?,
             Node::Meter {
@@ -291,8 +295,20 @@ impl Document {
     }
 }
 
-/// Persisted local presentation state: selected tabs, open sections and table
-/// sort/page/filter. Everything is re-validated against the program on restore.
+pub(super) fn lang_ok(lang: &str) -> Result<()> {
+    ensure!(
+        lang.len() <= 32
+            && lang
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'+')),
+        "invalid code language token"
+    );
+    Ok(())
+}
+
+/// Persisted local presentation state: selected tabs, open sections, table
+/// sort/page/filter, quiz questions and revealed answers. Everything is
+/// re-validated against the program on restore.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewSnapshot {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -301,6 +317,10 @@ pub struct ViewSnapshot {
     open: Vec<(usize, usize, bool)>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     tables: BTreeMap<usize, TableSnapshot>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    quiz: BTreeMap<usize, usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    revealed: Vec<(usize, usize)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -319,6 +339,9 @@ pub(super) struct ComponentState {
     open: BTreeMap<(usize, usize), bool>,
     tables: BTreeMap<usize, TableState>,
     copy: Option<String>,
+    pub(super) editors: BTreeMap<usize, super::EditorState>,
+    pub(super) quiz: BTreeMap<usize, usize>,
+    pub(super) revealed: BTreeSet<(usize, usize)>,
 }
 /// Local table presentation state; selected rows remain original data indices.
 #[derive(Clone, Debug, Default)]
@@ -361,6 +384,8 @@ impl Session {
                     )
                 })
                 .collect(),
+            quiz: self.components.quiz.clone(),
+            revealed: self.components.revealed.iter().copied().collect(),
         }
     }
 
@@ -377,6 +402,18 @@ impl Session {
             if matches!(self.document.node(node), Some(Node::Accordion { items }) if section < items.len())
             {
                 next.open.insert((node, section), open);
+            }
+        }
+        for (&node, &question) in &view.quiz {
+            if matches!(self.document.node(node), Some(Node::Quiz { key: None, items }) if question < items.len())
+            {
+                next.quiz.insert(node, question);
+            }
+        }
+        for &(node, question) in &view.revealed {
+            if matches!(self.document.node(node), Some(Node::Quiz { items, .. }) if items.get(question).is_some_and(Question::has_answer))
+            {
+                next.revealed.insert((node, question));
             }
         }
         self.components = next;
@@ -503,6 +540,11 @@ impl Session {
                         }
                     }
                     Node::Form { fields, .. } => visit(session, fields, out),
+                    Node::Quiz { items, .. } => {
+                        if let Some(item) = items.get(session.question(index)) {
+                            visit(session, &item.view, out);
+                        }
+                    }
                     _ => {}
                 }
             }

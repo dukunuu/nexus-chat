@@ -56,6 +56,10 @@ const COMPONENTS: &[(&str, &str, &str)] = &[
     ("Badge", "badge", "text tone?"),
     ("Meter", "meter", "label value max? tone?"),
     ("Slider", "slider", "key label min max step"),
+    ("Editor", "editor", "key label lang? rows?"),
+    ("Choice", "choice", "key label options answer?"),
+    ("Quiz", "quiz", "items key?"),
+    ("Question", "", "title view? answer? explain?"),
 ];
 
 pub(super) fn signatures() -> String {
@@ -567,7 +571,8 @@ impl Context<'_> {
                     | "submit_label"
                     | "time"
                     | "name"
-            ) || name == "Stat" && key == "value"
+                    | "explain"
+            ) || matches!((name, key), ("Stat", "value") | ("Question", "answer"))
             {
                 self.template(expression, depth + 1)?
             } else if key == "rules" {

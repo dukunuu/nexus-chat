@@ -28,7 +28,10 @@ pub(super) fn control_count(node: &Node) -> usize {
         | Node::Form { .. }
         | Node::Rating { .. }
         | Node::Slider { .. }
-        | Node::Code { .. } => 1,
+        | Node::Code { .. }
+        | Node::Editor { .. } => 1,
+        Node::Choice { options, .. } => options.len(),
+        Node::Quiz { .. } => 2,
         Node::Table {
             select,
             sortable,
@@ -45,6 +48,9 @@ fn branch_height(nodes: &[Node], session: &Session, width: u16) -> u16 {
         .map_or(0, |area| area.bottom())
 }
 pub(super) fn height(node: &Node, session: &Session, width: u16) -> Option<u16> {
+    if let Some(height) = super::practice::height(node, session, width) {
+        return Some(height);
+    }
     Some(match node {
         Node::Tabs { items, .. } => {
             1 + items
@@ -113,6 +119,11 @@ pub(super) fn visible_regions(session: &Session, width: u16) -> Vec<(&Node, Rect
                     body(region, 1, region.height.saturating_sub(2)),
                     out,
                 ),
+                Node::Quiz { .. } => {
+                    if let Some((view, area)) = super::practice::quiz_view(node, session, region) {
+                        visit(session, view, area, out);
+                    }
+                }
                 _ => {}
             }
         }
@@ -145,6 +156,16 @@ pub(super) fn render(
     (focus, control, can_send): (Option<usize>, usize, bool),
     buffer: &mut Buffer,
 ) -> Option<(usize, Vec<(Rect, usize)>)> {
+    if let Some(hits) = super::practice::render(
+        node,
+        session,
+        area,
+        theme,
+        (focus, control, can_send),
+        buffer,
+    ) {
+        return Some((control_count(node), hits));
+    }
     let index = session.document().node_index(node);
     let mut next = control + control_count(node);
     let mut hits = Vec::new();
