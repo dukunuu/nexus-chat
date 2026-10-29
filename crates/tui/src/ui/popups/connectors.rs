@@ -184,7 +184,7 @@ fn render_list(f: &mut Frame, app: &AppView, area: ratatui::layout::Rect) {
     let width = usize::from(inner.width.saturating_sub(4));
     let name_width = infos
         .iter()
-        .map(|info| info.name.chars().count())
+        .map(|info| crate::ui::style::width(&info.name))
         .max()
         .unwrap_or(0)
         .min(20);

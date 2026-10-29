@@ -1837,6 +1837,24 @@ fn fit_line_ellipsizes_across_spans() {
 }
 
 #[test]
+fn truncation_measures_cjk_in_display_columns() {
+    use crate::ui::style::width;
+    use ratatui::text::{Line, Span};
+    let title = "日本語の長いセッションタイトル";
+    let cut = super::chrome::truncate(title, 9);
+    assert_eq!(cut, "日本語の…");
+    assert!(width(&cut) <= 9);
+    let middle = super::chrome::truncate_middle("写真_東京タワーと富士山.png", 16);
+    assert!(width(&middle) <= 16, "{middle}");
+    assert!(
+        middle.starts_with("写真") && middle.ends_with(".png"),
+        "{middle}"
+    );
+    let fitted = super::chrome::fit_line(Line::from(vec![Span::raw("ab"), Span::raw("日本語")]), 6);
+    assert_eq!(fitted.to_string(), "ab日…");
+}
+
+#[test]
 fn session_picker_leads_with_the_title_and_marks_the_open_session() {
     let mut app = test_app();
     let space = app.core.active_space.id.clone();

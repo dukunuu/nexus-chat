@@ -129,7 +129,7 @@ fn render_files(f: &mut Frame, app: &AppView) {
             );
             let name = chrome::truncate_middle(
                 &file.name,
-                content_w.saturating_sub(meta.chars().count() + 1),
+                content_w.saturating_sub(crate::ui::style::width(&meta) + 1),
             );
             ListItem::new(Line::from(vec![
                 Span::styled(name, Style::default().fg(app.theme.fg)),
@@ -213,7 +213,7 @@ fn render_images(f: &mut Frame, app: &AppView) {
                 let name = chrome::truncate_middle(
                     &img.name,
                     (area.width.saturating_sub(5 + 2 * chrome::PAD) as usize)
-                        .saturating_sub(meta.chars().count() + 1),
+                        .saturating_sub(crate::ui::style::width(&meta) + 1),
                 );
                 ListItem::new(Line::from(vec![
                     Span::styled(name, Style::default().fg(app.theme.fg)),
@@ -301,7 +301,7 @@ fn render_scripts(f: &mut Frame, app: &AppView) {
             let name = chrome::truncate_middle(
                 &s.name,
                 (area.width.saturating_sub(5 + 2 * chrome::PAD) as usize)
-                    .saturating_sub(meta.chars().count() + 1),
+                    .saturating_sub(crate::ui::style::width(&meta) + 1),
             );
             ListItem::new(Line::from(vec![
                 Span::styled(name, Style::default().fg(app.theme.fg)),

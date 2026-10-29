@@ -703,7 +703,7 @@ pub(super) fn rule_line(
     theme: &crate::theme::Theme,
 ) {
     let label = format!(" {label} ");
-    let dashes = width.saturating_sub(label.chars().count());
+    let dashes = width.saturating_sub(crate::ui::style::width(&label));
     let line = format!(
         "{}{}{}",
         "─".repeat(dashes / 2),

@@ -261,13 +261,13 @@ fn context_numbers(app: &AppView, limit: u64) -> String {
 /// name but keeps its ` · backend` tag, which is the part that disambiguates.
 pub(super) fn fit_badge(prefix: &str, model: &str, max: usize) -> String {
     let full = format!("{prefix}{model}");
-    if full.chars().count() <= max {
+    if crate::ui::style::width(&full) <= max {
         return full;
     }
     let (name, tag) = model
         .rsplit_once(" · ")
         .map_or((model, String::new()), |(n, t)| (n, format!(" · {t}")));
-    let room = max.saturating_sub(prefix.chars().count() + tag.chars().count());
+    let room = max.saturating_sub(crate::ui::style::width(prefix) + crate::ui::style::width(&tag));
     if room < 4 {
         return popups::chrome::truncate(&full, max);
     }

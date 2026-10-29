@@ -62,10 +62,11 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 };
                 let topic = chrome::truncate(
                     &w.topic,
-                    width.saturating_sub(state.content.chars().count() + 2),
+                    width.saturating_sub(crate::ui::style::width(&state.content) + 2),
                 );
-                let pad =
-                    width.saturating_sub(topic.chars().count() + state.content.chars().count() + 2);
+                let pad = width.saturating_sub(
+                    crate::ui::style::width(&topic) + crate::ui::style::width(&state.content) + 2,
+                );
                 let top = Line::from(vec![
                     Span::styled(topic, Style::default().fg(app.theme.fg)),
                     Span::raw(" ".repeat(pad)),

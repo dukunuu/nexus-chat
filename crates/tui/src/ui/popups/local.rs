@@ -112,9 +112,11 @@ pub fn render(f: &mut Frame, app: &AppView) {
             let width = area.width.saturating_sub(6 + 2 * chrome::PAD) as usize;
             let name = chrome::truncate(
                 &name,
-                width.saturating_sub(chip.content.chars().count() + 2),
+                width.saturating_sub(crate::ui::style::width(&chip.content) + 2),
             );
-            let pad = width.saturating_sub(name.chars().count() + chip.content.chars().count() + 2);
+            let pad = width.saturating_sub(
+                crate::ui::style::width(&name) + crate::ui::style::width(&chip.content) + 2,
+            );
             let top = Line::from(vec![
                 Span::styled(name, Style::default().fg(app.theme.fg)),
                 Span::raw(" ".repeat(pad)),

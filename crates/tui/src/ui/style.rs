@@ -92,7 +92,7 @@ pub fn title(theme: &Theme, name: impl Into<String>) -> Span<'static> {
 /// `▍title ─────` — the one section header, ruled out to `width`.
 pub fn section(theme: &Theme, name: &str, width: usize) -> Line<'static> {
     let head = format!("{} {name} ", glyph::SECTION);
-    let rule = width.saturating_sub(head.chars().count());
+    let rule = width.saturating_sub(crate::ui::style::width(&head));
     Line::from(vec![
         Span::styled(
             head,
@@ -107,6 +107,12 @@ pub fn section(theme: &Theme, name: &str, width: usize) -> Line<'static> {
 /// Metadata text: times, stats, sizes, hints.
 pub fn meta(theme: &Theme, text: impl Into<String>) -> Span<'static> {
     Span::styled(text.into(), Style::default().fg(theme.fg_dim))
+}
+
+/// Display columns of `s`: CJK and most emoji take two, so layout math
+/// measures with this, never `chars().count()`.
+pub fn width(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
 }
 
 /// The inline field separator, in the chrome color.

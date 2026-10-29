@@ -71,9 +71,11 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
             // right-aligned; widths are display cells (emoji markers are 2).
             let when = crate::ui::fmt_created(&s.created_at);
             let marker_w = marker.as_ref().map_or(0, Span::width);
-            let title_max = width.saturating_sub(marker_w + when.chars().count() + 2);
+            let title_max = width.saturating_sub(marker_w + crate::ui::style::width(&when) + 2);
             let title = chrome::truncate(&s.title, title_max);
-            let gap = width.saturating_sub(marker_w + title.chars().count() + when.chars().count());
+            let gap = width.saturating_sub(
+                marker_w + crate::ui::style::width(&title) + crate::ui::style::width(&when),
+            );
             let mut top_spans: Vec<Span> = marker.into_iter().collect();
             top_spans.extend([
                 Span::styled(

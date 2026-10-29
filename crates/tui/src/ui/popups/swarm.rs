@@ -26,7 +26,7 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 let content_w = (area.width.saturating_sub(5 + 2 * chrome::PAD)) as usize;
                 let name = chrome::truncate(
                     &p.name,
-                    content_w.saturating_sub(p.model.chars().count() + 3),
+                    content_w.saturating_sub(crate::ui::style::width(&p.model) + 3),
                 );
                 let blurb = chrome::truncate(&p.blurb, content_w.saturating_sub(3));
                 let top = Line::from(vec![

@@ -103,6 +103,25 @@ pub(super) fn render_input(f: &mut Frame, app: &mut AppView, area: Rect) {
         "Ask anything · / commands · @ files · F1 help"
     });
     f.render_widget(&app.input, inner);
+    // Terminal IMEs draw in-progress (preedit) text at the real cursor, which
+    // otherwise trails wherever the last changed cell was. Park it on the
+    // caret the textarea drew and let the terminal's own cursor show it.
+    if app.popup == nexus_core::app::Popup::None
+        && let Some(caret) = take_caret(f, inner)
+    {
+        f.set_cursor_position(caret);
+    }
+}
+
+/// The textarea's caret cell inside `area` (it draws the caret `REVERSED`),
+/// with that styling removed so the terminal cursor alone marks it.
+fn take_caret(f: &mut Frame, area: Rect) -> Option<ratatui::layout::Position> {
+    let buffer = f.buffer_mut();
+    let caret = area
+        .positions()
+        .find(|&p| buffer[p].modifier.contains(Modifier::REVERSED))?;
+    buffer[caret].modifier.remove(Modifier::REVERSED);
+    Some(caret)
 }
 
 /// Slash-command autocomplete: a fuzzy-ranked list floating just above the
@@ -136,7 +155,7 @@ pub(super) fn render_command_popup(f: &mut Frame, app: &AppView, input_area: Rec
     // Pad the `/name` column so every description starts at the same column.
     let name_w = matches
         .iter()
-        .map(|c| c.name().chars().count())
+        .map(|c| crate::ui::style::width(c.name()))
         .max()
         .unwrap_or(0)
         + 1;

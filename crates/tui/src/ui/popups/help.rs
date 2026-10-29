@@ -93,7 +93,7 @@ pub fn help_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
     };
     let key_w = KEYS
         .iter()
-        .flat_map(|(_, rows)| rows.iter().map(|(k, _)| k.chars().count()))
+        .flat_map(|(_, rows)| rows.iter().map(|(k, _)| crate::ui::style::width(k)))
         .max()
         .unwrap_or(0);
     let mut lines = Vec::new();
@@ -112,7 +112,7 @@ pub fn help_lines(theme: &Theme, width: usize) -> Vec<Line<'static>> {
     lines.push(heading("commands"));
     let cmd_w = COMMANDS
         .iter()
-        .map(|c| c.name.chars().count() + 1)
+        .map(|c| crate::ui::style::width(c.name) + 1)
         .max()
         .unwrap_or(0);
     for c in COMMANDS {

@@ -20,6 +20,7 @@ use ratatui::widgets::{
 
 use crate::app_view::AppView;
 use crate::theme::Theme;
+use crate::ui::style::width;
 
 /// Canonical popup sizes — every popup picks one so the whole family reads
 /// as the same design: small prompts, standard lists, tall lists, wide
@@ -123,12 +124,7 @@ pub fn hinted_block<'a>(
     let mut block = popup_block_focused(title, &app.theme, focused, tone);
     if !app.settings.hide_hints && !hint.trim().is_empty() {
         let max = (width.saturating_sub(4)) as usize; // +2 for the border, +2 for the hint padding
-        let text: String = if hint.chars().count() > max {
-            let keep = max.saturating_sub(1);
-            format!("{}…", hint.chars().take(keep).collect::<String>())
-        } else {
-            hint.to_string()
-        };
+        let text = truncate(hint, max);
         block = block.title_bottom(
             Line::from(Span::styled(
                 format!(" {text} "),
@@ -344,52 +340,68 @@ pub fn standard_list<'a>(items: Vec<ListItem<'a>>, theme: &Theme) -> List<'a> {
         )
 }
 
-/// Truncate `s` to `max` chars, appending `…` when it overflows — the same
-/// ellipsis language as the hint bar, for row names across popups.
+/// Truncate `s` to `max` display columns, appending `…` when it overflows —
+/// the same ellipsis language as the hint bar, for row names across popups.
 pub fn truncate(s: &str, max: usize) -> String {
     let max = max.max(1);
-    if s.chars().count() <= max {
+    if width(s) <= max {
         return s.to_string();
     }
-    let keep = max.saturating_sub(1);
-    format!("{}…", s.chars().take(keep).collect::<String>())
+    format!(
+        "{}…",
+        take_cols(s.chars(), max - 1)
+            .into_iter()
+            .collect::<String>()
+    )
 }
 
-/// Truncate `s` to `max` chars by cutting the middle — for file names, where
-/// the start tells files apart and the end carries the descriptive slug and
-/// extension (`b0db75e4-2…_reasoning_model_what.png`).
+/// Truncate `s` to `max` display columns by cutting the middle — for file
+/// names, where the start tells files apart and the end carries the
+/// descriptive slug and extension (`b0db75e4-2…_reasoning_model_what.png`).
 pub fn truncate_middle(s: &str, max: usize) -> String {
     let max = max.max(1);
-    let n = s.chars().count();
-    if n <= max {
+    if width(s) <= max {
         return s.to_string();
     }
     let keep = max - 1;
     let head = keep / 3;
-    let tail = keep - head;
-    let start: String = s.chars().take(head).collect();
-    let end: String = s.chars().skip(n - tail).collect();
+    let start: String = take_cols(s.chars(), head).into_iter().collect();
+    let end: String = take_cols(s.chars().rev(), keep - width(&start))
+        .into_iter()
+        .rev()
+        .collect();
     format!("{start}…{end}")
+}
+
+/// The leading chars of `chars` that fit in `cols` display columns.
+fn take_cols(chars: impl Iterator<Item = char>, cols: usize) -> Vec<char> {
+    let mut used = 0;
+    chars
+        .take_while(|&c| {
+            used += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            used <= cols
+        })
+        .collect()
 }
 
 /// Fit a styled line to `width` columns: unchanged when it fits, otherwise
 /// cut across spans with a trailing `…` in the style of the span it lands in —
 /// so narrow terminals read "0 cache wr…" instead of a silent mid-word cut.
-pub fn fit_line(line: Line<'_>, width: usize) -> Line<'_> {
-    let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-    if total <= width {
+pub fn fit_line(line: Line<'_>, cols: usize) -> Line<'_> {
+    let total: usize = line.spans.iter().map(|s| width(&s.content)).sum();
+    if total <= cols {
         return line;
     }
     let mut spans = Vec::with_capacity(line.spans.len());
-    if width > 0 {
-        let mut left = width - 1;
+    if cols > 0 {
+        let mut left = cols - 1;
         for span in line.spans {
-            let n = span.content.chars().count();
+            let n = width(&span.content);
             if n <= left {
                 left -= n;
                 spans.push(span);
             } else {
-                let kept: String = span.content.chars().take(left).collect();
+                let kept: String = take_cols(span.content.chars(), left).into_iter().collect();
                 spans.push(Span::styled(format!("{kept}…"), span.style));
                 break;
             }

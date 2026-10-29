@@ -29,9 +29,13 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 } else {
                     skill_source(&s.dir)
                 };
-                let name =
-                    chrome::truncate(&s.name, width.saturating_sub(source.chars().count() + 2));
-                let gap = width.saturating_sub(name.chars().count() + source.chars().count());
+                let name = chrome::truncate(
+                    &s.name,
+                    width.saturating_sub(crate::ui::style::width(&source) + 2),
+                );
+                let gap = width.saturating_sub(
+                    crate::ui::style::width(&name) + crate::ui::style::width(&source),
+                );
                 ListItem::new(Line::from(vec![
                     Span::styled(name, Style::default().fg(app.theme.fg)),
                     Span::raw(" ".repeat(gap)),

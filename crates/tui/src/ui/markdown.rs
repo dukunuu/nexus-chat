@@ -369,8 +369,8 @@ fn push_code_border(r: &mut Rendered, width: usize, lang: Option<&str>, rule: Co
     }
     let style = Style::default().fg(rule);
     let line = match lang {
-        Some(lang) if !lang.is_empty() && width > lang.chars().count() + 6 => {
-            let fill = width - lang.chars().count() - 5;
+        Some(lang) if !lang.is_empty() && width > crate::ui::style::width(lang) + 6 => {
+            let fill = width - crate::ui::style::width(lang) - 5;
             Line::from(vec![
                 Span::styled("┌─ ", style),
                 Span::styled(lang.to_string(), style.add_modifier(Modifier::ITALIC)),

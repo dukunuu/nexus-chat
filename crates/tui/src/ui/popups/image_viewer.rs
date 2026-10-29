@@ -64,11 +64,11 @@ fn hint(app: &AppView, video: bool, width: u16) -> String {
     let mut used = 0;
     let mut kept = Vec::new();
     for (_, order, text) in ranked {
-        let cost = text.chars().count()
+        let cost = crate::ui::style::width(text)
             + if kept.is_empty() {
                 0
             } else {
-                style::SEP.chars().count()
+                crate::ui::style::width(style::SEP)
             };
         if used + cost > budget {
             break;
@@ -99,11 +99,11 @@ fn footer_line(app: &AppView, video: bool, width: usize) -> Vec<(String, u8)> {
     if video {
         fields.insert(0, ("video thumbnail".into(), 10));
     }
-    let sep = style::SEP.chars().count();
+    let sep = crate::ui::style::width(style::SEP);
     let total = |fields: &[(String, u8)]| -> usize {
         fields
             .iter()
-            .map(|(text, _)| text.chars().count())
+            .map(|(text, _)| crate::ui::style::width(text))
             .sum::<usize>()
             + sep * fields.len().saturating_sub(1)
     };
@@ -178,8 +178,11 @@ pub fn render(f: &mut Frame, app: &mut AppView) {
 
     let count = app.image_viewer.items().len();
     let counter = (count > 1).then(|| format!("{}/{count} ", app.image_viewer.index() + 1));
-    let room = usize::from(footer.width)
-        .saturating_sub(counter.as_ref().map_or(0, |c| c.chars().count() + 1));
+    let room = usize::from(footer.width).saturating_sub(
+        counter
+            .as_ref()
+            .map_or(0, |c| crate::ui::style::width(c) + 1),
+    );
     let mut spans = Vec::new();
     for (index, (field, _)) in footer_line(app, video, room).into_iter().enumerate() {
         if index > 0 {
@@ -278,7 +281,7 @@ fn render_menu(f: &mut Frame, app: &AppView, screen: Rect) {
         .iter()
         .map(|action| {
             let label = action.label();
-            let gap = width.saturating_sub(label.chars().count() + action.key().len());
+            let gap = width.saturating_sub(crate::ui::style::width(label) + action.key().len());
             ListItem::new(Line::from(vec![
                 Span::raw(label),
                 Span::raw(" ".repeat(gap)),

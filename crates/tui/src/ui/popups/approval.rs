@@ -491,7 +491,7 @@ fn render_footer(
         " {}{} ",
         chrome::truncate(
             hint,
-            hint_width.saturating_sub(percentage.chars().count() + 2)
+            hint_width.saturating_sub(crate::ui::style::width(&percentage) + 2)
         ),
         percentage
     );

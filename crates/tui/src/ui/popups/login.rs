@@ -57,9 +57,13 @@ pub fn render(f: &mut Frame, app: &AppView) {
                 Span::styled(format!("{} no key", glyph::RING), dim)
             };
             let width = area.width.saturating_sub(6 + 2 * chrome::PAD) as usize;
-            let name =
-                chrome::truncate(name, width.saturating_sub(chip.content.chars().count() + 2));
-            let pad = width.saturating_sub(name.chars().count() + chip.content.chars().count() + 2);
+            let name = chrome::truncate(
+                name,
+                width.saturating_sub(crate::ui::style::width(&chip.content) + 2),
+            );
+            let pad = width.saturating_sub(
+                crate::ui::style::width(&name) + crate::ui::style::width(&chip.content) + 2,
+            );
             let top = Line::from(vec![
                 ratatui::text::Span::styled(name, Style::default().fg(app.theme.fg)),
                 ratatui::text::Span::raw(" ".repeat(pad)),

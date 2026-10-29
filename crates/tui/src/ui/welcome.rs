@@ -152,9 +152,9 @@ fn push_recent(lines: &mut Vec<Line<'static>>, app: &AppView, area: Rect) -> Vec
             rule_line(lines, "recent", row_w, &app.theme);
             for (i, s) in recent.iter().enumerate() {
                 let when = super::fmt_created(&s.created_at);
-                let title_w = row_w.saturating_sub(4 + when.chars().count());
+                let title_w = row_w.saturating_sub(4 + crate::ui::style::width(&when));
                 let title = crate::ui::popups::chrome::truncate(&s.title, title_w);
-                let pad = title_w.saturating_sub(title.chars().count());
+                let pad = title_w.saturating_sub(crate::ui::style::width(&title));
                 recent_rows.push((lines.len(), s.id.clone()));
                 lines.push(Line::from(vec![
                     Span::styled(

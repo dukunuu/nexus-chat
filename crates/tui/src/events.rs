@@ -2073,6 +2073,42 @@ mod tests {
         (app, copies)
     }
 
+    /// Titles are cut by display columns: a Japanese session title must not
+    /// run over the composer's own title or lose its ellipsis.
+    #[test]
+    fn a_japanese_session_title_fits_the_composer_border() {
+        let mut app = test_app();
+        let space = app.active_space.id.clone();
+        let title = "日本語の文章を書くための長いセッションタイトルです";
+        app.session = Some(app.db.create_session(title, "m", &space, "chat").unwrap());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 12)).unwrap();
+        terminal.draw(|f| ui::render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let y = app.input_inner.y - 1;
+        let border: String = (0..50).map(|x| buffer[(x, y)].symbol()).collect();
+        assert!(border.contains('❯'), "{border}");
+        assert!(border.contains('…'), "{border}");
+    }
+
+    /// Terminal IMEs draw the in-progress (preedit) text at the real cursor,
+    /// so the frame must leave it on the composer's caret, past wide glyphs.
+    #[test]
+    fn the_terminal_cursor_sits_on_the_composer_caret_for_ime_preedit() {
+        use ratatui::backend::Backend as _;
+        let mut app = test_app();
+        app.set_input("日本語 abc");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| ui::render(f, &mut app)).unwrap();
+        let inner = app.input_inner;
+        assert_eq!(
+            terminal.backend_mut().get_cursor_position().unwrap(),
+            Position::new(inner.x + 10, inner.y),
+            "6 columns of kanji, a space and abc put the caret at column 10"
+        );
+    }
+
     #[test]
     fn ctrl_c_in_the_image_viewer_copies_the_picture_and_leaves_it_open() {
         let (mut app, copies) = viewer_with_picture();

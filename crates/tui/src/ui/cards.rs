@@ -99,8 +99,11 @@ pub(super) fn push_user_card(
     )];
     if let Some(t) = created_at {
         let time = super::fmt_created(t);
-        let used: usize = head.iter().map(|s| s.content.chars().count()).sum();
-        let pad = inner.saturating_sub(used + 1 + time.chars().count());
+        let used: usize = head
+            .iter()
+            .map(|s| crate::ui::style::width(&s.content))
+            .sum();
+        let pad = inner.saturating_sub(used + 1 + crate::ui::style::width(&time));
         head.push(Span::raw(" ".repeat(pad)));
         head.push(Span::styled(time, Style::default().fg(theme.fg_dim)));
     }
@@ -128,7 +131,11 @@ pub(super) fn push_user_card(
     let lead = width.saturating_sub(card_w);
     let rail = Style::default().fg(theme.user_msg).patch(bg_style);
     for (li, line) in card.into_iter().enumerate() {
-        let len: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+        let len: usize = line
+            .spans
+            .iter()
+            .map(|s| crate::ui::style::width(&s.content))
+            .sum();
         let is_image = card_img[li].is_some();
         let mut spans = Vec::with_capacity(4);
         if lead > 0 {
@@ -298,14 +305,7 @@ fn push_batch_digest(
             let mut shown = targets
                 .iter()
                 .take(2)
-                .map(|target| {
-                    let text: String = target.chars().take(28).collect();
-                    if target.chars().count() > 28 {
-                        format!("{text}…")
-                    } else {
-                        text
-                    }
-                })
+                .map(|target| super::popups::chrome::truncate(target, 29))
                 .collect::<Vec<_>>()
                 .join(", ");
             if targets.len() > 2 {
@@ -1572,8 +1572,11 @@ pub(super) fn push_assistant_stored(
     }
     if let Some(t) = &msg.created_at {
         let time = super::fmt_created(t);
-        let head_len: usize = head.iter().map(|s| s.content.chars().count()).sum();
-        let pad = width.saturating_sub(head_len + 1 + time.chars().count());
+        let head_len: usize = head
+            .iter()
+            .map(|s| crate::ui::style::width(&s.content))
+            .sum();
+        let pad = width.saturating_sub(head_len + 1 + crate::ui::style::width(&time));
         head.push(Span::raw(" ".repeat(pad)));
         head.push(Span::styled(time, Style::default().fg(theme.fg_dim)));
     }
@@ -1721,8 +1724,11 @@ pub(super) fn push_assistant_streaming(
     if let Some(t) = app.active_chat_task() {
         let secs = t.started.elapsed().as_secs();
         let time = format!("{}:{:02}", secs / 60, secs % 60);
-        let used: usize = head.iter().map(|s| s.content.chars().count()).sum();
-        let pad = width.saturating_sub(used + 1 + time.chars().count());
+        let used: usize = head
+            .iter()
+            .map(|s| crate::ui::style::width(&s.content))
+            .sum();
+        let pad = width.saturating_sub(used + 1 + crate::ui::style::width(&time));
         head.push(Span::raw(" ".repeat(pad)));
         head.push(Span::styled(time, Style::default().fg(app.theme.fg_dim)));
     }
