@@ -1837,6 +1837,31 @@ fn fit_line_ellipsizes_across_spans() {
 }
 
 #[test]
+fn find_picker_rows_show_the_name_then_its_folder_from_home() {
+    use nexus_core::filesearch::Found;
+    let mut app = test_app();
+    app.popup = nexus_core::app::Popup::Files;
+    app.files_mode = nexus_core::app::FilesMode::Pick;
+    app.picker_home = std::path::PathBuf::from("/Users/me");
+    app.picker_query = "rep".into();
+    app.picker_results = vec![
+        Found {
+            path: "/Users/me/work/q3 report.pdf".into(),
+            is_dir: false,
+        },
+        Found {
+            path: "/Users/me/reports".into(),
+            is_dir: true,
+        },
+    ];
+    let out = render_to_string(80, 20, |f| super::files::render(f, &app));
+    assert!(out.contains("find"), "{out}");
+    assert!(out.contains("q3 report.pdf  ~/work"), "{out}");
+    assert!(out.contains("reports/  ~"), "{out}");
+    assert!(out.contains("Tab complete"), "{out}");
+}
+
+#[test]
 fn truncation_measures_cjk_in_display_columns() {
     use crate::ui::style::width;
     use ratatui::text::{Line, Span};

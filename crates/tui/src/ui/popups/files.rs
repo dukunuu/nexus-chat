@@ -64,44 +64,7 @@ fn render_files(f: &mut Frame, app: &AppView) {
     let area = chrome::popup_area(app, f.area(), "files", chrome::STANDARD);
 
     if app.files_mode == FilesMode::Pick {
-        let entries = app.filtered_picker_entries();
-        let items: Vec<ListItem> = entries
-            .iter()
-            .map(|e| {
-                let max = (area.width.saturating_sub(5 + 2 * chrome::PAD)) as usize;
-                if e.is_dir {
-                    ListItem::new(Line::from(Span::styled(
-                        chrome::truncate(&format!("{}/", e.name), max),
-                        Style::default().fg(app.theme.accent),
-                    )))
-                } else {
-                    ListItem::new(Line::from(Span::styled(
-                        chrome::truncate(&e.name, max),
-                        Style::default().fg(app.theme.fg),
-                    )))
-                }
-            })
-            .collect();
-        let inner = chrome::render_hinted(
-            f,
-            area,
-            chrome::input_title(
-                app,
-                app.picker_dir.display().to_string(),
-                &app.picker_filter,
-                "",
-            ),
-            "Enter open/import · Backspace up · Esc cancel",
-            app,
-            true,
-            chrome::Tone::Normal,
-        );
-        let list = chrome::standard_list(items, &app.theme);
-        let mut state = ListState::default();
-        if !entries.is_empty() {
-            state.select(Some(app.picker_selected.min(entries.len() - 1)));
-        }
-        chrome::render_list(f, list, &mut state, inner, entries.len(), 1, app);
+        render_picker(f, app, area);
         return;
     }
 
@@ -156,9 +119,11 @@ fn render_files(f: &mut Frame, app: &AppView) {
         FilesMode::Add => "Enter import · Esc cancel".to_string(),
         FilesMode::Rename => "Enter rename · Esc cancel".to_string(),
         FilesMode::ConfirmDelete => "Ctrl+D confirm · Esc cancel".to_string(),
-        FilesMode::Browse if app.files_cache.is_empty() => "Ctrl+N add · Tab tab".to_string(),
+        FilesMode::Browse if app.files_cache.is_empty() => {
+            "Ctrl+N import · / find · drop files here · Tab tab".to_string()
+        }
         FilesMode::Browse => format!(
-            "{}↑↓ · Enter open · Ctrl+N add · Ctrl+R rename · Ctrl+D remove · Ctrl+O re-extract · Ctrl+F OCR · Tab tab",
+            "{}↑↓ · Enter open · Ctrl+N import · / find · Ctrl+R rename · Ctrl+D remove · Ctrl+O re-extract · Ctrl+F OCR · Tab tab",
             chrome::count_hint(app.files_cache.len(), "file")
         ),
         FilesMode::Pick => String::new(),
@@ -193,6 +158,75 @@ fn render_files(f: &mut Frame, app: &AppView) {
         state.select(Some(app.files_selected.min(app.files_cache.len() - 1)));
     }
     chrome::render_list(f, list, &mut state, inner, app.files_cache.len(), 1, app);
+}
+
+/// The find picker: recent files, search results or path completions, each
+/// row the name (directories in the accent color) then its folder, dimmed.
+fn render_picker(f: &mut Frame, app: &AppView, area: Rect) {
+    let home = &app.picker_home;
+    let max = (area.width.saturating_sub(5 + 2 * chrome::PAD)) as usize;
+    let dim = Style::default().fg(app.theme.fg_dim);
+    let items: Vec<ListItem> = if app.picker_results.is_empty() {
+        let empty = if app.picker_rx.is_some() {
+            "searching…"
+        } else if app.picker_query.trim().is_empty() {
+            "nothing recent in Downloads, Desktop or Documents — type to search"
+        } else {
+            "no matches"
+        };
+        vec![chrome::empty_placeholder(empty, &app.theme)]
+    } else {
+        app.picker_results
+            .iter()
+            .map(|found| {
+                let name = found
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let (name, style) = if found.is_dir {
+                    (format!("{name}/"), Style::default().fg(app.theme.accent))
+                } else {
+                    (name, Style::default().fg(app.theme.fg))
+                };
+                let name = chrome::truncate_middle(&name, max);
+                let folder = found
+                    .path
+                    .parent()
+                    .map(|dir| nexus_core::filesearch::tilde(dir, home))
+                    .unwrap_or_default();
+                let folder = chrome::truncate_middle(
+                    &format!("  {folder}"),
+                    max.saturating_sub(crate::ui::style::width(&name)),
+                );
+                ListItem::new(Line::from(vec![
+                    Span::styled(name, style),
+                    Span::styled(folder, dim),
+                ]))
+            })
+            .collect()
+    };
+    let label = if app.picker_rx.is_some() {
+        "find · searching…"
+    } else {
+        "find"
+    };
+    let inner = chrome::render_hinted(
+        f,
+        area,
+        chrome::input_title(app, label, &app.picker_query, ""),
+        "Enter import · Tab complete · ~/ or / for a path · Esc back",
+        app,
+        true,
+        chrome::Tone::Normal,
+    );
+    let list = chrome::standard_list(items, &app.theme);
+    let total = app.picker_results.len();
+    let mut state = ListState::default();
+    if total > 0 {
+        state.select(Some(app.picker_selected.min(total - 1)));
+    }
+    chrome::render_list(f, list, &mut state, inner, total, 1, app);
 }
 
 fn render_images(f: &mut Frame, app: &AppView) {
@@ -347,7 +381,8 @@ fn render_scripts(f: &mut Frame, app: &AppView) {
 }
 
 pub fn handle_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
-    if key.code == KeyCode::Tab {
+    let picking = app.files_tab == FilesTab::Files && app.files_mode == FilesMode::Pick;
+    if key.code == KeyCode::Tab && !picking {
         app.files_tab = match app.files_tab {
             FilesTab::Files => FilesTab::Images,
             FilesTab::Images => FilesTab::Scripts,
@@ -407,11 +442,15 @@ fn handle_files_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
                 app.reocr_selected_file();
                 return Ok(());
             }
+            if key.code == KeyCode::Char('/') && !super::is_chord(key) {
+                app.open_file_picker();
+                return Ok(());
+            }
             match classify_browse_key(key, true, true) {
                 Some(BrowseAction::Close) => app.popup = nexus_core::app::Popup::None,
                 Some(BrowseAction::MoveUp) => app.move_files_selection(-1),
                 Some(BrowseAction::MoveDown) => app.move_files_selection(1),
-                Some(BrowseAction::Create) => app.open_file_picker(),
+                Some(BrowseAction::Create) => app.import_files(),
                 Some(BrowseAction::Rename) => app.start_files_rename(),
                 Some(BrowseAction::ConfirmDelete) if !app.files_cache.is_empty() => {
                     app.files_mode = FilesMode::ConfirmDelete;
@@ -420,8 +459,12 @@ fn handle_files_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
             }
         }
         FilesMode::Pick => match key.code {
-            KeyCode::Esc => app.files_mode = FilesMode::Browse,
+            KeyCode::Esc => {
+                app.picker_rx = None;
+                app.files_mode = FilesMode::Browse;
+            }
             KeyCode::Enter => app.picker_enter(),
+            KeyCode::Tab => app.picker_complete(),
             KeyCode::Backspace => app.picker_backspace(),
             KeyCode::Up => app.move_picker_selection(-1),
             KeyCode::Down => app.move_picker_selection(1),
@@ -429,9 +472,7 @@ fn handle_files_key(app: &mut AppView, key: KeyEvent) -> Result<()> {
             KeyCode::PageDown => app.move_picker_selection(10),
             KeyCode::Home => app.move_picker_selection(i32::MIN / 2),
             KeyCode::End => app.move_picker_selection(i32::MAX / 2),
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.picker_filter_push(c);
-            }
+            KeyCode::Char(c) if !super::is_chord(key) => app.picker_push(c),
             _ => {}
         },
     }

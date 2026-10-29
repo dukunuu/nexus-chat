@@ -9,105 +9,134 @@
 )]
 use anyhow::Result;
 
+use std::path::PathBuf;
+
 use nexus_core::app::{FilesMode, FilesTab, Popup};
+use nexus_core::filesearch;
 
 use crate::app_view::AppView;
 
-pub struct PickerEntry {
-    pub name: String,
-    pub is_dir: bool,
-}
+/// Rows the find picker shows at most.
+const PICKER_MAX: usize = 200;
 
 impl AppView {
-    /// Enter the picker at `picker_dir` (home on first open, remembered after).
-    pub fn open_file_picker(&mut self) {
-        self.picker_filter.clear();
-        self.picker_selected = 0;
-        self.reload_picker_entries();
-        self.files_mode = FilesMode::Pick;
-    }
-
-    /// Re-read the current directory: dirs first, then files, both alphabetical.
-    /// Unreadable dirs just yield an empty list (status explains).
-    fn reload_picker_entries(&mut self) {
-        let mut entries: Vec<PickerEntry> = match std::fs::read_dir(&self.picker_dir) {
-            Ok(rd) => rd
-                .flatten()
-                .filter_map(|e| {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    let is_dir = e.file_type().ok()?.is_dir();
-                    Some(PickerEntry { name, is_dir })
-                })
-                .collect(),
-            Err(e) => {
-                let dir = self.picker_dir.display().to_string();
-                self.push_status(format!("cannot read {dir}: {e}"));
-                Vec::new()
-            }
-        };
-        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
-        self.picker_entries = entries;
-    }
-
-    /// Entries matching the fuzzy filter (all of them, dirs first, when empty).
-    pub fn filtered_picker_entries(&self) -> Vec<&PickerEntry> {
-        let needle = self.picker_filter.trim();
-        if needle.is_empty() {
-            return self.picker_entries.iter().collect();
+    /// Ctrl+N in /files: the system Open panel (several files at once) when
+    /// a desktop session can show one, otherwise the find picker.
+    pub fn import_files(&mut self) {
+        if !self.dialogs.available() {
+            self.open_file_picker();
+            return;
         }
-        nexus_core::app::fuzzy_filter_sorted(&self.picker_entries, |e| {
-            nexus_core::app::fuzzy_score(&e.name, needle)
-        })
+        let start = self.picker_home.join("Downloads");
+        let title = format!("Import into {}", self.active_space.name);
+        let picked = self.dialogs.open_files(&title, Some(&start), &[]);
+        self.import_paths(&picked);
+    }
+
+    /// Copy each path into the space, with one status line for the batch.
+    pub fn import_paths(&mut self, paths: &[PathBuf]) {
+        let mut imported = Vec::new();
+        for path in paths {
+            match self.core.import_file(path) {
+                Ok(name) => imported.push(name),
+                Err(e) => {
+                    self.push_status(format!("import failed: {e}"));
+                    return;
+                }
+            }
+        }
+        match imported.as_slice() {
+            [] => {}
+            [name] => self.push_status(format!("imported {name}")),
+            names => self.push_status(format!("imported {} files", names.len())),
+        }
+    }
+
+    /// Open the find picker on the newest files in the usual drop folders.
+    pub fn open_file_picker(&mut self) {
+        self.picker_query.clear();
+        self.files_mode = FilesMode::Pick;
+        self.refresh_picker();
+    }
+
+    /// Re-run the picker for its query: recent files when empty, path
+    /// completion for `/…` and `~…`, otherwise a background search whose
+    /// results replace the current ones when they land.
+    fn refresh_picker(&mut self) {
+        self.picker_selected = 0;
+        self.picker_rx = None;
+        let home = self.picker_home.clone();
+        let query = self.picker_query.clone();
+        if query.trim().is_empty() {
+            self.picker_results = filesearch::recent(&home, PICKER_MAX);
+        } else if query.starts_with('/') || query.starts_with('~') {
+            self.picker_results = filesearch::complete(&query, &home);
+        } else {
+            let spotlight = self.picker_spotlight;
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(filesearch::search(&home, &query, PICKER_MAX, spotlight));
+            });
+            self.picker_rx = Some(rx);
+        }
+    }
+
+    /// A background search finished for the current query.
+    pub fn finish_picker_search(&mut self, results: Vec<filesearch::Found>) {
+        self.picker_rx = None;
+        self.picker_results = results;
+        self.picker_selected = 0;
     }
 
     pub fn move_picker_selection(&mut self, delta: i32) {
-        self.picker_selected = nexus_core::app::clamp_cursor(
-            self.picker_selected,
-            self.filtered_picker_entries().len(),
-            delta,
-        );
+        self.picker_selected =
+            nexus_core::app::clamp_cursor(self.picker_selected, self.picker_results.len(), delta);
     }
 
-    pub fn picker_filter_push(&mut self, c: char) {
-        self.picker_filter.push(c);
-        self.picker_selected = 0;
+    pub fn picker_push(&mut self, c: char) {
+        self.picker_type(c.encode_utf8(&mut [0; 4]));
     }
 
-    /// Backspace erases the filter first; on an empty filter it goes up a level.
-    pub fn picker_backspace(&mut self) {
-        if !self.picker_filter.is_empty() {
-            self.picker_filter.pop();
-            self.picker_selected = 0;
+    /// Append typed or pasted text to the query and search once for it.
+    pub fn picker_type(&mut self, text: &str) {
+        if text.is_empty() {
             return;
         }
-        if let Some(parent) = self.picker_dir.parent().map(std::path::Path::to_path_buf) {
-            self.picker_dir = parent;
-            self.picker_selected = 0;
-            self.reload_picker_entries();
+        self.picker_query.push_str(text);
+        self.refresh_picker();
+    }
+
+    pub fn picker_backspace(&mut self) {
+        if self.picker_query.pop().is_some() {
+            self.refresh_picker();
         }
     }
 
-    /// Enter descends into a directory, or imports the selected file.
+    /// Enter imports the highlighted file, or completes into a directory.
     pub fn picker_enter(&mut self) {
-        let filtered = self.filtered_picker_entries();
-        let Some(entry) = filtered.get(self.picker_selected) else {
+        let Some(found) = self.picker_results.get(self.picker_selected).cloned() else {
             return;
         };
-        let name = entry.name.clone();
-        let is_dir = entry.is_dir;
-        let path = self.picker_dir.join(&name);
-        if is_dir {
-            self.picker_dir = path;
-            self.picker_filter.clear();
-            self.picker_selected = 0;
-            self.reload_picker_entries();
+        if found.is_dir {
+            self.picker_complete();
             return;
         }
-        match self.core.import_file(&path) {
-            Ok(n) => self.push_status(format!("imported {n}")),
-            Err(e) => self.push_status(format!("import failed: {e}")),
-        }
+        self.import_paths(&[found.path]);
         self.files_mode = FilesMode::Browse;
+    }
+
+    /// Tab puts the highlighted entry's path in the query (a directory gets
+    /// its trailing slash), switching to path completion.
+    pub fn picker_complete(&mut self) {
+        let Some(found) = self.picker_results.get(self.picker_selected) else {
+            return;
+        };
+        let mut query = filesearch::tilde(&found.path, &self.picker_home);
+        if found.is_dir {
+            query.push('/');
+        }
+        self.picker_query = query;
+        self.refresh_picker();
     }
 
     /// Ctrl+O in /files: throw away the selected file's extracted text (and
@@ -281,68 +310,96 @@ mod tests {
         assert_eq!(a.core.files_cache.len(), 1);
         assert!(a.files_mode == nexus_core::app::FilesMode::Browse);
     }
-    #[test]
-    fn picker_lists_dirs_first_descends_and_imports() {
+    /// A picker whose home is a temp folder holding `files`.
+    fn picker_app(files: &[&str]) -> (AppView, PathBuf) {
         let mut a = test_app();
-        let root = std::env::temp_dir().join(format!("nexus-pick-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(root.join("subdir")).unwrap();
-        std::fs::write(root.join("bbb.txt"), "file b").unwrap();
-        std::fs::write(root.join("aaa.txt"), "file a").unwrap();
-
-        a.picker_dir = root.clone();
-        a.open_file_picker();
-        assert!(a.files_mode == nexus_core::app::FilesMode::Pick);
-        let names: Vec<&str> = a
-            .filtered_picker_entries()
-            .iter()
-            .map(|e| e.name.as_str())
-            .collect();
-        assert_eq!(names, vec!["subdir", "aaa.txt", "bbb.txt"]); // dirs first, then alpha
-
-        // Enter on a dir descends and reloads.
-        a.picker_selected = 0;
-        a.picker_enter();
-        assert_eq!(a.picker_dir, root.join("subdir"));
-        assert!(a.filtered_picker_entries().is_empty());
-
-        // Backspace with empty filter ascends.
-        a.picker_backspace();
-        assert_eq!(a.picker_dir, root);
-
-        // Enter on a file imports it and returns to Browse.
-        let idx = a
-            .filtered_picker_entries()
-            .iter()
-            .position(|e| e.name == "aaa.txt")
-            .unwrap();
-        a.picker_selected = idx;
-        a.picker_enter();
-        assert!(a.files_mode == nexus_core::app::FilesMode::Browse);
-        assert!(a.core.files_cache.iter().any(|f| f.name == "aaa.txt"));
+        let home = std::env::temp_dir().join(format!("nexus-pick-{}", uuid::Uuid::new_v4()));
+        for file in files {
+            let path = home.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "content").unwrap();
+        }
+        a.picker_home = home.canonicalize().unwrap();
+        (a, home)
     }
-    #[test]
-    fn picker_filter_fuzzy_matches_and_backspace_edits_filter_first() {
-        let mut a = test_app();
-        let root = std::env::temp_dir().join(format!("nexus-pick-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("report-2026.pdf"), "x").unwrap();
-        std::fs::write(root.join("notes.md"), "y").unwrap();
-        a.picker_dir = root.clone();
-        a.open_file_picker();
 
-        a.picker_filter_push('r');
-        a.picker_filter_push('p');
-        a.picker_filter_push('t');
-        let names: Vec<&str> = a
-            .filtered_picker_entries()
+    fn shown(a: &AppView) -> Vec<String> {
+        a.picker_results
             .iter()
-            .map(|e| e.name.as_str())
-            .collect();
-        assert_eq!(names, vec!["report-2026.pdf"]); // fuzzy subsequence "rpt"
+            .map(|f| filesearch::tilde(&f.path, &a.picker_home))
+            .collect()
+    }
 
-        // Backspace edits the filter (does NOT ascend while filter non-empty).
+    #[test]
+    fn picker_opens_on_recent_files_and_searches_in_the_background() {
+        let (mut a, home) = picker_app(&["Downloads/report.pdf", "work/deep/q3 report.txt"]);
+        a.open_file_picker();
+        assert!(a.files_mode == FilesMode::Pick);
+        assert_eq!(shown(&a), ["~/Downloads/report.pdf"]);
+
+        for c in "q3 rep".chars() {
+            a.picker_push(c);
+        }
+        let results = a.picker_rx.take().unwrap().blocking_recv().unwrap();
+        a.finish_picker_search(results);
+        assert_eq!(shown(&a), ["~/work/deep/q3 report.txt"]);
+
+        a.picker_enter();
+        assert!(a.files_mode == FilesMode::Browse);
+        assert!(a.core.files_cache.iter().any(|f| f.name == "q3 report.txt"));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn picker_completes_typed_paths_and_enter_descends_into_directories() {
+        let (mut a, home) = picker_app(&["Documents/notes.md", "docs.txt"]);
+        a.open_file_picker();
+        for c in "~/do".chars() {
+            a.picker_push(c);
+        }
+        assert!(a.picker_rx.is_none(), "path completion answers at once");
+        assert_eq!(shown(&a), ["~/Documents", "~/docs.txt"]);
+
+        a.picker_enter();
+        assert_eq!(a.picker_query, "~/Documents/");
+        assert_eq!(shown(&a), ["~/Documents/notes.md"]);
         a.picker_backspace();
-        assert_eq!(a.picker_filter, "rp");
-        assert_eq!(a.picker_dir, root);
+        assert_eq!(shown(&a), ["~/Documents"]);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn ctrl_n_imports_what_the_open_panel_picks_or_falls_back_to_the_picker() {
+        use nexus_core::canvas::dialogs::Scripted;
+        let (mut a, home) = picker_app(&["a.txt", "b.txt"]);
+        let picked = a.picker_home.join("a.txt");
+        a.dialogs = Box::new(Scripted::new([Some(picked)]));
+        a.import_files();
+        assert!(a.core.files_cache.iter().any(|f| f.name == "a.txt"));
+        assert!(a.files_mode == FilesMode::Browse);
+
+        a.dialogs = Box::new(Scripted::unavailable());
+        a.import_files();
+        assert!(a.files_mode == FilesMode::Pick);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn files_dropped_on_the_popup_import_at_once_with_escaped_names() {
+        let (mut a, home) = picker_app(&["My File.pdf", "notes.md"]);
+        a.open_files_popup(FilesTab::Files);
+        let root = a.picker_home.display().to_string();
+        a.paste(&format!("{root}/My\\ File.pdf '{root}/notes.md'"));
+        let names: Vec<&str> = a.core.files_cache.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"My File.pdf") && names.contains(&"notes.md"),
+            "{names:?}"
+        );
+        assert!(a.files_mode == FilesMode::Browse);
+
+        a.open_file_picker();
+        a.paste("not a path");
+        assert_eq!(a.picker_query, "not a path");
+        std::fs::remove_dir_all(home).unwrap();
     }
 }

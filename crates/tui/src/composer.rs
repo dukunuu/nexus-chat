@@ -117,16 +117,96 @@ pub(crate) fn copy_to_clipboard(clipboard: &mut Option<arboard::Clipboard>, text
 }
 
 /// If pasted text is a single absolute path to an existing regular file
-/// (optionally `file://`-prefixed or quoted, as file managers produce on
-/// drag/drop), return the cleaned path.
+/// (optionally `file://`-prefixed, quoted or shell-escaped, as file managers
+/// and terminals produce on drag/drop), return the cleaned path.
 pub(crate) fn pasted_file_path(text: &str) -> Option<std::path::PathBuf> {
-    let t = text.trim().trim_matches('"').trim_matches('\'');
-    let t = t.strip_prefix("file://").unwrap_or(t);
-    if t.contains('\n') || !t.starts_with('/') {
+    let mut paths = pasted_file_paths(text)?;
+    (paths.len() == 1).then(|| paths.remove(0))
+}
+
+/// Pasted text naming one or more existing files, as a drop arrives: the
+/// whole text as one path, or shell words (`My\ File.pdf`, `'a b.txt'`,
+/// `file:///…%20…`) separated by spaces or newlines, every one an absolute
+/// path to a regular file.
+pub(crate) fn pasted_file_paths(text: &str) -> Option<Vec<std::path::PathBuf>> {
+    let file = |word: &str| {
+        let word = word
+            .strip_prefix("file://")
+            .map_or_else(|| word.to_string(), percent_decode);
+        let path = std::path::PathBuf::from(word);
+        (path.is_absolute() && path.is_file()).then_some(path)
+    };
+    let whole = text.trim().trim_matches('"').trim_matches('\'');
+    if let Some(path) = file(whole).filter(|_| !whole.contains('\n')) {
+        return Some(vec![path]);
+    }
+    let words = shell_words(text);
+    if words.is_empty() {
         return None;
     }
-    let path = std::path::PathBuf::from(t);
-    path.is_file().then_some(path)
+    words.iter().map(|word| file(word)).collect()
+}
+
+/// Split `text` like a shell: whitespace separates words, quotes group, and
+/// a backslash takes the next character literally (outside single quotes).
+fn shell_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('"') | None, '\\') => {
+                word.extend(chars.next());
+                in_word = true;
+            }
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                in_word = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            (None, c) => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    words
+}
+
+/// Decode `%XX` escapes in a `file://` URL's path; malformed ones stay.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                i += 3;
+            }
+            (byte, _) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Cap on the workspace walk behind `@` completion.
@@ -254,6 +334,16 @@ impl AppView {
         if text.is_empty() {
             return;
         }
+        // Files dropped on /files are imported straight away.
+        if self.popup == Popup::Files
+            && self.files_tab == nexus_core::app::FilesTab::Files
+            && matches!(self.files_mode, FilesMode::Browse | FilesMode::Pick)
+            && let Some(paths) = pasted_file_paths(text)
+        {
+            self.import_paths(&paths);
+            self.files_mode = FilesMode::Browse;
+            return;
+        }
         match self.popup {
             Popup::None => {
                 // A dropped/pasted file path becomes an import offer instead of text.
@@ -299,9 +389,8 @@ impl AppView {
                 self.scripts_edit.push_str(text);
             }
             Popup::Files if self.files_mode == FilesMode::Pick => {
-                for c in text.chars().filter(|c| !c.is_control()) {
-                    self.picker_filter_push(c);
-                }
+                let typed: String = text.chars().filter(|c| !c.is_control()).collect();
+                self.picker_type(&typed);
             }
             Popup::Settings => {
                 if let Some(i) = self.text_index() {
@@ -1158,12 +1247,42 @@ mod tests {
     }
 
     #[test]
+    fn pasted_paths_accept_escapes_quotes_file_urls_and_several_files() {
+        let dir = std::env::temp_dir().join(format!("nexus-drop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let (spaced, plain) = (dir.join("a b.pdf"), dir.join("c.txt"));
+        std::fs::write(&spaced, "x").unwrap();
+        std::fs::write(&plain, "x").unwrap();
+        let root = dir.display();
+        for text in [
+            format!("{root}/a b.pdf"),
+            format!("{root}/a\\ b.pdf"),
+            format!("'{root}/a b.pdf'\n"),
+            format!("file://{root}/a%20b.pdf"),
+        ] {
+            assert_eq!(pasted_file_path(&text), Some(spaced.clone()), "{text}");
+        }
+        assert_eq!(
+            pasted_file_paths(&format!("{root}/a\\ b.pdf {root}/c.txt")),
+            Some(vec![spaced, plain.clone()])
+        );
+        assert_eq!(
+            pasted_file_path(&format!("{root}/a\\ b.pdf {root}/c.txt")),
+            None
+        );
+        assert_eq!(pasted_file_paths(&format!("see {root}/c.txt")), None);
+        assert_eq!(pasted_file_paths("relative.txt"), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn paste_in_picker_mode_feeds_the_filter() {
         let mut a = test_app();
         a.popup = Popup::Files;
         a.files_mode = nexus_core::app::FilesMode::Pick;
         a.paste("doc");
-        assert_eq!(a.picker_filter, "doc");
+        assert_eq!(a.picker_query, "doc");
     }
 
     #[test]

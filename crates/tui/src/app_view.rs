@@ -21,7 +21,6 @@ use nexus_core::db::Space as SpaceRow;
 use nexus_core::provider::BackendTag;
 
 use crate::filter_input::FilterInput;
-use crate::flows::files::PickerEntry;
 use crate::history_cache::HistoryCache;
 use crate::selection::HistorySel;
 use crate::theme::{BackgroundMode, Theme};
@@ -273,11 +272,15 @@ pub struct AppView {
     pub files_tab: FilesTab,
     /// Path being typed/pasted in the files popup's Add mode.
     pub files_edit: String,
-    /// Directory the file-picker browser is showing (remembered across opens).
-    pub picker_dir: PathBuf,
-    pub picker_entries: Vec<PickerEntry>,
-    pub picker_filter: String,
+    /// The find picker (`/` or Ctrl+N without a desktop): its home folder,
+    /// typed query, shown results, highlighted row, and the search running
+    /// for the query (Spotlight only outside tests).
+    pub picker_home: PathBuf,
+    pub picker_query: String,
+    pub picker_results: Vec<nexus_core::filesearch::Found>,
     pub picker_selected: usize,
+    pub picker_rx: Option<tokio::sync::oneshot::Receiver<Vec<nexus_core::filesearch::Found>>>,
+    pub picker_spotlight: bool,
     pub images_selected: usize,
     pub images_mode: ImagesMode,
     pub scripts_selected: usize,
@@ -542,10 +545,12 @@ impl AppView {
             files_mode: FilesMode::Browse,
             files_tab: FilesTab::Files,
             files_edit: String::new(),
-            picker_dir: std::env::home_dir().unwrap_or_else(|| PathBuf::from("/")),
-            picker_entries: Vec::new(),
-            picker_filter: String::new(),
+            picker_home: std::env::home_dir().unwrap_or_else(|| PathBuf::from("/")),
+            picker_query: String::new(),
+            picker_results: Vec::new(),
             picker_selected: 0,
+            picker_rx: None,
+            picker_spotlight: cfg!(all(target_os = "macos", not(test))),
             images_selected: 0,
             images_mode: ImagesMode::Browse,
             scripts_selected: 0,

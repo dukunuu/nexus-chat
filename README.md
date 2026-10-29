@@ -582,7 +582,7 @@ Type `/` in the composer for autocomplete. Aliases in parentheses.
 | `/research! <topic>` | same, no survey/approval gates |
 | `/watch` | standing research, re-runs every 24h |
 | `/swarm` (`panel`) | multi-persona roundtable |
-| `/files` (`images`, `scripts`, …) | browse space files / images / scripts |
+| `/files` (`images`, `scripts`, …) | browse space files / images / scripts; `Ctrl+N` imports through the system Open panel, `/` finds files on this machine (Spotlight on macOS, `~/` for a path), and files dropped on it import at once |
 | `/apps` (`webapps`) | view web apps and pinned interactive panels |
 | `/pin-panel [name]` (`pin`) | keep the focused panel as a reusable mini-app |
 | `/studio [file]` (`deck`, `slides`) | open the last doc or deck (or the named one) in the studio window linked to this conversation; with none yet, open the library (see `docs/studio.md`) |

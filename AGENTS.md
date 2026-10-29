@@ -94,6 +94,7 @@ The README has the full tree; the parts agents touch most:
 | `crates/tui/src/composer.rs` | TextArea ops: editing, clipboard, slash/`@` autocomplete (catalog stays core) |
 | `crates/tui/src/ui/` | ratatui rendering; `history.rs` is the main view, `popups/` one module per popup, `markdown.rs` the styled renderer |
 | `crates/core/src/config.rs`, `space.rs` | credentials + spaces layout (XDG dirs) |
+| `crates/core/src/filesearch.rs` | finding files to import (`/files`): `recent` (newest in Downloads/Desktop/Documents), `search` (Spotlight `mdfind`, else a time-boxed gitignore-aware walk of home; hidden paths and `~/Library` left out), `complete` for typed `/…`/`~/…` paths |
 
 > Phase 2 status: the workspace split (2a), `ToolExecutor` seam (2b),
 > command/event seam (2c), CLI on the seam (2d), and the status-event

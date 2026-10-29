@@ -26,6 +26,7 @@ pub mod design;
 pub mod doc;
 pub mod eval;
 pub mod extract;
+pub mod filesearch;
 pub mod host;
 pub mod interactive;
 pub mod jobs;

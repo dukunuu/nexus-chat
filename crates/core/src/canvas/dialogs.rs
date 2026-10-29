@@ -37,6 +37,10 @@ pub trait Dialogs: Send + Sync {
         true
     }
     fn open_file(&self, title: &str, start: Option<&Path>, filters: &[Filter]) -> Option<PathBuf>;
+    /// An Open dialog that may pick several files; empty is a cancel.
+    fn open_files(&self, title: &str, start: Option<&Path>, filters: &[Filter]) -> Vec<PathBuf> {
+        self.open_file(title, start, filters).into_iter().collect()
+    }
     fn save_file(
         &self,
         title: &str,
@@ -146,6 +150,15 @@ impl Dialogs for Native {
 
     fn open_file(&self, title: &str, start: Option<&Path>, filters: &[Filter]) -> Option<PathBuf> {
         guarded(|| Self::dialog(title, start, filters).pick_file())
+    }
+
+    fn open_files(&self, title: &str, start: Option<&Path>, filters: &[Filter]) -> Vec<PathBuf> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Self::dialog(title, start, filters).pick_files()
+        }))
+        .ok()
+        .flatten()
+        .unwrap_or_default()
     }
 
     fn save_file(

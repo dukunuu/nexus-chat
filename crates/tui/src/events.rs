@@ -87,6 +87,14 @@ async fn next_shell_completion(
     }
 }
 
+/// The reply a background job will send, or never while none is running.
+async fn next_reply<T>(receiver: &mut Option<tokio::sync::oneshot::Receiver<T>>) -> Option<T> {
+    match receiver {
+        Some(receiver) => receiver.await.ok(),
+        None => std::future::pending().await,
+    }
+}
+
 // Long by design (event loop).
 #[allow(clippy::too_many_lines)]
 async fn run_loop(
@@ -179,6 +187,12 @@ async fn run_loop(
                     app.finish_shell_completion(completion);
                 } else {
                     app.shell_completion_rx = None;
+                }
+            }
+            results = next_reply(&mut app.picker_rx) => {
+                match results {
+                    Some(results) => app.finish_picker_search(results),
+                    None => app.picker_rx = None,
                 }
             }
             completion = app.diagrams.next_completion() => {
