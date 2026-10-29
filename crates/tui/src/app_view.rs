@@ -17,7 +17,7 @@ use nexus_core::app::{
     MouseTarget, PendingEditor, Popup, ScriptsMode, SessionMode, SettingsField, SkillsMode,
     SpaceMode, SwarmPopupMode, WatchMode,
 };
-use nexus_core::db::{FileRow, Space as SpaceRow};
+use nexus_core::db::Space as SpaceRow;
 use nexus_core::provider::BackendTag;
 
 use crate::filter_input::FilterInput;
@@ -219,7 +219,13 @@ pub struct AppView {
     pub recall: Option<usize>,
     pub recall_draft: String,
     /// `@` file autocomplete: (matches, selected, cursor byte offset of `@`).
-    pub at_state: Option<(Vec<FileRow>, usize, usize)>,
+    pub at_state: Option<(Vec<crate::composer::AtMatch>, usize, usize)>,
+    /// The agent workspace's files behind `@`: (root, walked at, paths).
+    pub project_files: Option<(
+        std::path::PathBuf,
+        std::time::Instant,
+        std::sync::Arc<Vec<String>>,
+    )>,
     /// User shell completion uses the same floating menu as slash and @ lists.
     pub shell_state: Option<crate::composer::ShellCompletionState>,
     pub shell_completion_rx:
@@ -503,6 +509,7 @@ impl AppView {
             recall: None,
             recall_draft: String::new(),
             at_state: None,
+            project_files: None,
             shell_state: None,
             shell_completion_rx: None,
             shell_recall: None,

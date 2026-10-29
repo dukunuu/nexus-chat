@@ -18,6 +18,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, ListItem, ListState, P
 use super::style::glyph;
 use super::{popups, to_color};
 use crate::app_view::AppView;
+use crate::composer::AtMatch;
 
 pub(super) fn render_input(f: &mut Frame, app: &mut AppView, area: Rect) {
     let hints = !app.settings.hide_hints;
@@ -230,27 +231,39 @@ fn floating_menu(
     f.render_stateful_widget(list, area, &mut state);
 }
 
-/// `@` file autocomplete: space files matching the text after `@`.
+/// `@` file autocomplete: agent-workspace paths (name, then dim folder) and
+/// space files (name, then dim size and status) matching the text after `@`.
 pub(super) fn render_at_popup(f: &mut Frame, app: &AppView, input_area: Rect) {
     let Some((ref matches, selected, _)) = app.at_state else {
         return;
     };
     let row_w = usize::from(input_area.width.min(MENU_W)).saturating_sub(5);
+    let dim = Style::default().fg(app.theme.fg_dim);
     let items: Vec<ListItem> = matches
         .iter()
-        .map(|f| {
-            let meta = format!(
-                "  {}  {}",
-                nexus_core::app::human_size(f.size.unsigned_abs()),
-                f.status
-            );
-            let name = popups::chrome::truncate_middle(
-                &f.name,
-                row_w.saturating_sub(meta.chars().count()),
+        .map(|m| {
+            let (name, meta) = match m {
+                AtMatch::Project(path) => match path.rsplit_once('/') {
+                    Some((dir, name)) => (name, format!("  {dir}")),
+                    None => (path.as_str(), String::new()),
+                },
+                AtMatch::Space(file) => (
+                    file.name.as_str(),
+                    format!(
+                        "  {}  {}",
+                        nexus_core::app::human_size(file.size.unsigned_abs()),
+                        file.status
+                    ),
+                ),
+            };
+            let name = popups::chrome::truncate_middle(name, row_w);
+            let meta = popups::chrome::truncate_middle(
+                &meta,
+                row_w.saturating_sub(crate::ui::style::width(&name)),
             );
             ListItem::new(Line::from(vec![
                 Span::styled(name, Style::default().fg(app.theme.fg)),
-                Span::styled(meta, Style::default().fg(app.theme.fg_dim)),
+                Span::styled(meta, dim),
             ]))
         })
         .collect();

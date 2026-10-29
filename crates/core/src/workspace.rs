@@ -110,6 +110,35 @@ impl Workspace {
         &self.root
     }
 
+    /// Up to `max` workspace files as sorted root-relative paths, for `@`
+    /// completion: gitignore-aware like the `fs_*` tools, never following
+    /// links, and skipping `.git` and the hard-denied directories.
+    #[must_use]
+    pub fn files(&self, max: usize) -> Vec<String> {
+        let root = self.root.clone();
+        let deny = self.deny.clone();
+        let walk = ignore::WalkBuilder::new(&self.root)
+            .hidden(false)
+            .require_git(false)
+            .git_global(false)
+            .follow_links(false)
+            .filter_entry(move |entry| {
+                entry.file_name() != ".git" && !deny.iter().any(|d| entry.path().starts_with(d))
+            })
+            .build();
+        let mut files: Vec<String> = walk
+            .flatten()
+            .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+            .filter_map(|entry| {
+                let rel = entry.path().strip_prefix(&root).ok()?;
+                Some(rel.to_string_lossy().into_owned())
+            })
+            .take(max)
+            .collect();
+        files.sort();
+        files
+    }
+
     /// Resolve a relative path, or an absolute path inside this workspace.
     /// Missing targets are resolved through their nearest existing ancestor.
     pub fn resolve(&self, rel: &str, access: Access) -> Result<PathBuf, PathError> {
@@ -476,5 +505,28 @@ mod tests {
         assert_ne!(changed.sha256, stamp.sha256);
         assert_ne!(changed, stamp);
         assert_eq!(workspace.last_read(&path), Some(stamp));
+    }
+
+    #[test]
+    fn files_lists_relative_paths_honoring_gitignore_and_deny() {
+        let dir = TempWorkspace::new();
+        for path in [
+            "src/main.rs",
+            "README.md",
+            "target/debug/out",
+            "secret/key",
+            ".git/HEAD",
+        ] {
+            let path = dir.0.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        }
+        std::fs::write(dir.0.join(".gitignore"), "target/\n").unwrap();
+        let workspace = Workspace::open(&dir.0, vec![dir.0.join("secret")]).unwrap();
+        assert_eq!(
+            workspace.files(100),
+            [".gitignore", "README.md", "src/main.rs"]
+        );
+        assert_eq!(workspace.files(1).len(), 1);
     }
 }

@@ -129,6 +129,54 @@ pub(crate) fn pasted_file_path(text: &str) -> Option<std::path::PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// Cap on the workspace walk behind `@` completion.
+const PROJECT_FILES_MAX: usize = 20_000;
+/// How long a workspace listing serves `@` before it is walked again.
+const PROJECT_FILES_TTL: Duration = Duration::from_secs(5);
+/// Rows the `@` menu holds; the rest are a keystroke away.
+const AT_MATCHES_MAX: usize = 50;
+
+/// One `@` completion: a path in the agent workspace, or a space file.
+#[derive(Clone, Debug)]
+pub enum AtMatch {
+    Project(String),
+    Space(nexus_core::db::FileRow),
+}
+
+impl AtMatch {
+    /// What accepting the match inserts.
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Project(path) => path,
+            Self::Space(file) => &file.name,
+        }
+    }
+
+    const fn is_space(&self) -> bool {
+        matches!(self, Self::Space(_))
+    }
+}
+
+/// Rank `path` for an `@` query: file-name prefix, then file-name substring,
+/// then path substring, then an in-order fuzzy match; `None` when none hit.
+fn at_score(path: &str, query: &str) -> Option<i32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let path = path.to_lowercase();
+    let query = query.to_lowercase();
+    let name = path.rsplit('/').next().unwrap_or(&path);
+    if name.starts_with(&query) {
+        Some(1000 - name.len().min(500) as i32)
+    } else if let Some(i) = name.find(&query) {
+        Some(500 - i.min(200) as i32)
+    } else if let Some(i) = path.find(&query) {
+        Some(200 - i.min(150) as i32)
+    } else {
+        nexus_core::app::fuzzy_score(&path, &query).map(|s| s.min(40))
+    }
+}
+
 impl AppView {
     pub fn input_text(&self) -> String {
         self.input.lines().join("\n")
@@ -585,20 +633,43 @@ impl AppView {
         Ok(())
     }
 
-    /// Find `@` before the cursor and match against space files.
-    /// Returns the query text after `@` (owned) and the byte offset of `@`.
+    /// The `@` token the cursor is in: the query after `@` (owned) and the
+    /// byte offset of `@`. `@` must start a word, so `me@host` stays prose.
     fn at_query(&self) -> Option<(String, usize)> {
         let text = self.input_text();
-        let cursor = self.input.cursor();
-        // tui-textarea cursor is (row, col). Single-line input → col is byte offset.
-        let pos = cursor.1;
-        let before = text.get(..pos)?;
+        let before = text.get(..self.cursor_byte())?;
         let at = before.rfind('@')?;
-        let rest = &text[at + 1..pos];
-        if rest.contains(char::is_whitespace) || rest.contains('/') {
+        if before[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| !c.is_whitespace())
+        {
+            return None;
+        }
+        let rest = &before[at + 1..];
+        if rest.contains(char::is_whitespace) {
             return None;
         }
         Some((rest.to_string(), at))
+    }
+
+    /// The agent workspace's files, re-walked when the workspace changes or
+    /// the listing is a few seconds old; `None` outside agent mode.
+    fn project_files(&mut self) -> Option<std::sync::Arc<Vec<String>>> {
+        if !self.work_mode.is_agent() {
+            return None;
+        }
+        let workspace = self.workspace.clone()?;
+        let fresh = self.project_files.as_ref().is_some_and(|(root, at, _)| {
+            root == workspace.root() && at.elapsed() < PROJECT_FILES_TTL
+        });
+        if !fresh {
+            let files = std::sync::Arc::new(workspace.files(PROJECT_FILES_MAX));
+            self.project_files = Some((workspace.root().to_path_buf(), Instant::now(), files));
+        }
+        self.project_files
+            .as_ref()
+            .map(|(_, _, files)| files.clone())
     }
 
     pub fn refresh_at_matches(&mut self) {
@@ -610,36 +681,28 @@ impl AppView {
             self.at_state = None;
             return;
         };
-        if query.is_empty() {
-            let all = self.files_cache.clone();
-            if all.is_empty() {
-                self.at_state = None;
-                return;
-            }
-            self.at_state = Some((all, 0, at_offset));
-            return;
-        }
-        let lower = query.to_lowercase();
-        let mut scored: Vec<(i32, &nexus_core::db::FileRow)> = self
-            .files_cache
+        let project = self.project_files().unwrap_or_default();
+        let mut scored: Vec<(i32, AtMatch)> = project
             .iter()
-            .filter_map(|f| {
-                let name_lower = f.name.to_lowercase();
-                let score = if name_lower.starts_with(&lower) {
-                    100 - (name_lower.len() as i32)
-                } else if let Some(idx) = name_lower.find(&lower) {
-                    50 - idx as i32
-                } else if nexus_core::app::fuzzy_score(&query, &f.name).is_some() {
-                    10
-                } else {
-                    return None;
-                };
-                Some((score, f))
-            })
+            .filter_map(|path| Some((at_score(path, &query)?, AtMatch::Project(path.clone()))))
+            .chain(
+                self.files_cache
+                    .iter()
+                    .filter_map(|f| Some((at_score(&f.name, &query)?, AtMatch::Space(f.clone())))),
+            )
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.name.cmp(&b.1.name)));
-        let matches: Vec<nexus_core::db::FileRow> =
-            scored.into_iter().map(|(_, f)| f.clone()).collect();
+        // Best score first; ties prefer project files, then shorter paths.
+        scored.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then(a.1.is_space().cmp(&b.1.is_space()))
+                .then(a.1.text().len().cmp(&b.1.text().len()))
+                .then(a.1.text().cmp(b.1.text()))
+        });
+        let matches: Vec<AtMatch> = scored
+            .into_iter()
+            .take(AT_MATCHES_MAX)
+            .map(|(_, m)| m)
+            .collect();
         if matches.is_empty() {
             self.at_state = None;
             return;
@@ -651,19 +714,17 @@ impl AppView {
         self.at_state = Some((matches, selected, at_offset));
     }
 
-    /// Accept the highlighted @-autocomplete match: replace `@<query>` with the filename.
+    /// Accept the highlighted @-autocomplete match: replace `@<query>` with
+    /// the file name or workspace-relative path.
     pub fn accept_at_match(&mut self) {
         let Some((ref matches, selected, at_offset)) = self.at_state.clone() else {
             return;
         };
-        let Some(f) = matches.get(selected) else {
+        let Some(m) = matches.get(selected) else {
             return;
         };
-        let text = self.input_text();
-        let cursor = self.input.cursor();
-        let pos = cursor.1;
-        let suffix = if pos < text.len() { &text[pos..] } else { "" };
-        self.set_input(&format!("{}{} {suffix}", &text[..at_offset], f.name));
+        let end = self.cursor_byte();
+        self.replace_shell_word(at_offset..end, &format!("{} ", m.text()));
         self.at_state = None;
     }
 
@@ -948,6 +1009,72 @@ mod tests {
         let mut app = test_app();
         app.work_mode = nexus_core::app::WorkMode::Agent;
         app
+    }
+
+    /// An agent-mode app bound to a temp workspace holding `files`.
+    fn workspace_app(files: &[&str]) -> (AppView, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("nexus-at-test-{}", uuid::Uuid::new_v4()));
+        for file in files {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        }
+        let mut app = agent_app();
+        let workspace = nexus_core::workspace::Workspace::open(&dir, Vec::new()).unwrap();
+        app.workspace = Some(std::sync::Arc::new(workspace));
+        (app, dir)
+    }
+
+    fn at_texts(app: &AppView) -> Vec<String> {
+        app.at_state
+            .as_ref()
+            .map(|(matches, _, _)| matches.iter().map(|m| m.text().to_string()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn at_completes_workspace_paths_in_agent_mode() {
+        let (mut a, dir) = workspace_app(&["src/main.rs", "src/app/mod.rs", "README.md"]);
+        a.set_input("look at @");
+        a.refresh_at_matches();
+        assert_eq!(at_texts(&a), ["README.md", "src/main.rs", "src/app/mod.rs"]);
+
+        a.set_input("look at @src/app");
+        a.refresh_at_matches();
+        assert_eq!(at_texts(&a), ["src/app/mod.rs"]);
+        a.accept_at_match();
+        assert_eq!(a.input_text(), "look at src/app/mod.rs ");
+        assert!(a.at_state.is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn at_skips_workspace_files_in_chat_mode() {
+        let (mut a, dir) = workspace_app(&["main.rs"]);
+        a.work_mode = nexus_core::app::WorkMode::Chat;
+        a.set_input("@ma");
+        a.refresh_at_matches();
+        assert!(a.at_state.is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn at_inside_a_word_is_not_a_mention() {
+        let (mut a, dir) = workspace_app(&["host.rs"]);
+        a.set_input("mail me@host");
+        a.refresh_at_matches();
+        assert!(a.at_state.is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn at_score_prefers_name_prefix_then_substrings_then_fuzzy() {
+        let prefix = at_score("docs/report.md", "rep").unwrap();
+        let name_sub = at_score("docs/q3-report.md", "rep").unwrap();
+        let path_sub = at_score("report/index.md", "rt/i").unwrap();
+        let fuzzy = at_score("quarterly-report.pdf", "qrp").unwrap();
+        assert!(prefix > name_sub && name_sub > path_sub && path_sub > fuzzy);
+        assert!(at_score("main.rs", "xyz").is_none());
     }
 
     #[test]
