@@ -510,6 +510,12 @@ next = Buttons([Button("Help me plan the trip", @Answer())])
 The themed panel supports buttons, optional ASCII artwork, editable string
 fields and local state/actions. Existing JSON panels remain readable. This is a
 bounded terminal dialect, not the full web OpenUI runtime.
+For practice and interview sets (“Give me five Python interview questions”) a
+`Quiz` pages through questions one at a time. Each question can hold a
+highlighted code `Editor` with line numbers (Enter to edit, Esc to stop, Tab
+indents), a `Choice` list that marks right and wrong once you pick, and an
+answer you reveal on request. “Grade my answers” sends everything, code
+included, for review.
 Click controls directly, or press `F2` to focus the newest visible panel and use
 Tab/arrows + Enter. `Esc`/`Ctrl+C` returns to chat without changing your draft.
 New panels display progressively but activate only when the reply finishes.
