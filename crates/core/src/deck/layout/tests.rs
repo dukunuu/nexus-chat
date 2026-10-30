@@ -387,6 +387,9 @@ fn compare_parity(dir: &std::path::Path) -> Vec<(String, f64, f64)> {
         let (mut frames, mut texts) = (0.0_f64, 0.0_f64);
         for slide in &deck.slides {
             let ours = layout_map(&deck, slide, None);
+            // Without the font, text boxes take other sizes and move the
+            // boxes laid out after them: only fixed sizes still compare.
+            let shifted = !has_font && slide.nodes().into_iter().any(depends_on_text);
             let theirs = expected["slides"][&slide.id]
                 .as_object()
                 .unwrap_or_else(|| panic!("rects-{name}.json has no slide {}", slide.id));
@@ -407,14 +410,14 @@ fn compare_parity(dir: &std::path::Path) -> Vec<(String, f64, f64)> {
                     .map(|v| v.as_f64().unwrap())
                     .collect();
                 let got = ours[&node.id];
-                let delta = [
-                    got.x - want[0],
-                    got.y - want[1],
-                    got.w - want[2],
-                    got.h - want[3],
-                ]
-                .iter()
-                .fold(0.0_f64, |m, d| m.max(d.abs()));
+                let position = if shifted {
+                    [0.0, 0.0]
+                } else {
+                    [got.x - want[0], got.y - want[1]]
+                };
+                let delta = [position[0], position[1], got.w - want[2], got.h - want[3]]
+                    .iter()
+                    .fold(0.0_f64, |m, d| m.max(d.abs()));
                 let (limit, seen) = if text_sized {
                     (TEXT_TOLERANCE, &mut texts)
                 } else {

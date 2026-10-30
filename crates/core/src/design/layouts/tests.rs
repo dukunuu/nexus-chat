@@ -346,10 +346,27 @@ fn checked(name: &str, design: &Design, values: &BTreeMap<String, String>) -> De
 
 fn text_fits(deck: &Deck, assets: &Path, rects: &BTreeMap<String, Rect>) {
     let mut typesetter = Typesetter::new(&deck.theme, Some(assets));
+    let families = crate::deck::text::deck_font_info(&deck.theme, Some(assets));
     for node in deck.slides[0].nodes() {
         if let Kind::Text { text, style, font } = &node.kind {
             let rect = rects[&node.id];
-            let style = typesetter.text_style(deck.theme.resolve_font(style, font), false);
+            let resolved = deck.theme.resolve_font(style, font);
+            // Layouts are sized for their font stack; when no named family
+            // in it is installed (Linux CI: no Inter, Helvetica or Segoe) a
+            // generic fallback face runs wider.
+            let stack = crate::deck::text::font_stack(&deck.theme, &resolved.family);
+            if !stack
+                .split(',')
+                .map(|name| name.trim().trim_matches('\''))
+                .any(|name| families.iter().any(|f| f.family == name))
+            {
+                eprintln!(
+                    "skipped {} {}: no font of {stack} is installed",
+                    deck.title, node.id
+                );
+                continue;
+            }
+            let style = typesetter.text_style(resolved, false);
             let (height, width) = typesetter.markdown(
                 &mut String::new(),
                 &style,

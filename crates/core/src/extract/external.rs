@@ -175,6 +175,10 @@ pub fn run_capped(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::config::scrub_secret_env(&mut cmd);
+    // Its own process group, so a timeout also stops what a wrapper script
+    // started: Linux's `sh` keeps running children that hold our pipes open.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             RunError::Missing
@@ -214,6 +218,7 @@ pub fn run_capped(
         }
         if over_cap || Instant::now() >= deadline {
             timed_out = !over_cap;
+            kill_group(child.id());
             let _ = child.kill();
             let _ = child.wait();
             break None;
@@ -241,6 +246,18 @@ pub fn run_capped(
     }
     Ok(RunOutput { stdout, truncated })
 }
+
+#[cfg(unix)]
+fn kill_group(pid: u32) {
+    if let Ok(pid) = libc::pid_t::try_from(pid) {
+        // SAFETY: the pid is our child's, spawned as its own process group
+        // leader; negating it signals only that group.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_group(_pid: u32) {}
 
 /// A converted file: the text and how it was produced.
 #[derive(Debug)]
@@ -754,7 +771,7 @@ mod tests {
     #[test]
     fn run_capped_enforces_timeout_and_output_cap() {
         let bin = Bin::new();
-        bin.tool("slow", "sleep 30").tool(
+        bin.tool("slow", "sleep 30; true").tool(
             "flood",
             "while true; do echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; done",
         );

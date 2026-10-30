@@ -663,9 +663,15 @@ mod tests {
     #[tokio::test]
     async fn failed_and_oversized_commands_are_rejected() {
         assert!(run_command(&["/usr/bin/false".into()]).await.is_err());
-        let error = run_command(&["/usr/bin/printf".into(), "%1048577s".into(), "x".into()])
-            .await
-            .unwrap_err();
+        // `head -c` behaves the same everywhere; BSD and GNU printf differ on
+        // huge field widths.
+        let error = run_command(&[
+            "/bin/sh".into(),
+            "-c".into(),
+            "yes x | head -c 1048577".into(),
+        ])
+        .await
+        .unwrap_err();
         assert!(error.to_string().contains("exceeds 1 MiB"));
     }
 
