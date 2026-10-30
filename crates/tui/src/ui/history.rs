@@ -328,6 +328,24 @@ pub(super) fn render_history(f: &mut Frame, app: &mut AppView, area: Rect) {
         .collect();
 
     f.render_widget(Paragraph::new(visible), inner);
+    if app.popup == nexus_core::app::Popup::None {
+        let regions = crate::pictures::regions(
+            &app.history_cache.lines,
+            &app.history_cache.image_at_line,
+            top..(top + height).min(cached_lines),
+        );
+        app.pictures
+            .paint(f.buffer_mut(), inner, top, &regions, |target| {
+                if target.contains("://") {
+                    match crate::app_view::remote_image(target) {
+                        nexus_core::remote_image::Status::Ready(path) => Some(path),
+                        _ => None,
+                    }
+                } else {
+                    Some(std::path::PathBuf::from(target))
+                }
+            });
+    }
     app.favicons.paint(
         f.buffer_mut(),
         inner,

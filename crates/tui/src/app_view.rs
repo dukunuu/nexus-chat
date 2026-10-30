@@ -402,6 +402,8 @@ pub struct AppView {
     pub diagrams: crate::diagrams::DiagramCache,
     /// Site icons drawn over link badges in the history.
     pub favicons: crate::favicons::Favicons,
+    /// Real-graphics pictures drawn over their half-block layout.
+    pub pictures: crate::pictures::Pictures,
     /// The full-screen in-terminal image viewer's state and background jobs.
     pub image_viewer: crate::image_viewer::Viewer,
     /// Per-session history caches preserved across session switches so
@@ -624,6 +626,7 @@ impl AppView {
             stream_image_cache: std::cell::RefCell::default(),
             diagrams: crate::diagrams::DiagramCache::default(),
             favicons: crate::favicons::Favicons::default(),
+            pictures: crate::pictures::Pictures::default(),
             image_viewer: crate::image_viewer::Viewer::default(),
             session_caches: HashMap::new(),
             show_tool_detail: false,
