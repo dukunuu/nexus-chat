@@ -57,7 +57,7 @@ jobs:
           # The TUI pins nexus-chat-core exactly (a caret let fresh installs
           # resolve an older core); move the pin with the bump.
           sed -i 's|nexus-chat-core = { path = "../core", version = "=[^"]*"|nexus-chat-core = { path = "../core", version = "='"$new"'"|' crates/tui/Cargo.toml
-          grep -c 'version = "='"$new"'"' crates/tui/Cargo.toml | grep -qx 2
+          grep -c 'version = "='"$new"'"' crates/tui/Cargo.toml | grep -qx 1
           # Sanity check: fail loudly if the manifests are inconsistent.
           cargo metadata --no-deps --locked >/dev/null
           git config user.name "github-actions[bot]"
