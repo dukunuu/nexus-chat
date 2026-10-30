@@ -1,17 +1,19 @@
 //! Standalone playback, bundling studio's actual renderer and animation modules.
+//! They are read through `assets/studio-ui`, symlinks to `crates/studio/ui`,
+//! so the published crate (which cannot reach outside itself) packages them.
 
 use super::super::{Deck, Kind, layout::image_path, text::escape};
 use anyhow::Result;
 use base64::Engine as _;
 use std::path::Path;
 
-const CSS: &str = include_str!("../../../../studio/ui/studio.css");
-const INDEX: &str = include_str!("../../../../studio/ui/index.html");
+const CSS: &str = include_str!("../../../assets/studio-ui/studio.css");
+const INDEX: &str = include_str!("../../../assets/studio-ui/index.html");
 const MODULES: [&str; 4] = [
-    include_str!("../../../../studio/ui/helpers.js"),
-    include_str!("../../../../studio/ui/render.js"),
-    include_str!("../../../../studio/ui/animations.js"),
-    include_str!("../../../../studio/ui/playback.js"),
+    include_str!("../../../assets/studio-ui/helpers.js"),
+    include_str!("../../../assets/studio-ui/render.js"),
+    include_str!("../../../assets/studio-ui/animations.js"),
+    include_str!("../../../assets/studio-ui/playback.js"),
 ];
 
 fn data(mime: &str, bytes: &[u8]) -> String {
