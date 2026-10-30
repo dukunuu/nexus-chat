@@ -19,7 +19,7 @@ path = "src/main.rs"
 # rewritten for the registry). It is pinned exactly to the workspace
 # version: a caret `0.1` let a fresh `cargo install` resolve an older
 # nexus-chat-core and fail to compile. version-bump.yml rewrites the pin.
-nexus-chat-core = { path = "../core", version = "=0.1.41", features = ["native-dialogs"] }
+nexus-chat-core = { path = "../core", version = "=0.1.42", features = ["native-dialogs"] }
 anyhow = { workspace = true }
 arboard = { workspace = true }
 chrono = { workspace = true }
